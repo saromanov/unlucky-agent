@@ -1,0 +1,35 @@
+id: S04
+title: "git clean -fdx: теряются .env и локальные файлы"
+group: loss
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux, darwin]
+fixture: project_git
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "чекпоинт делает адаптер тестируемого инструмента"
+
+damage:
+  - shell: "git clean -fdx"
+
+restore:
+  mode: newest
+
+expect:
+  restore:
+    - "work/.env"
+    - "work/src/local.settings.json"
+  preserve: []
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

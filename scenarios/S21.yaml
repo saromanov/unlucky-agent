@@ -1,0 +1,34 @@
+id: S21
+title: "Правка после T не должна затираться откатом"
+group: safety
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux, darwin]
+fixture: project_basic
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "после порчи человек правит workspace, откат не должен потерять эту правку"
+
+damage:
+  - shell: "rm -rf src"
+  - post_edit: "mkdir -p src && printf 'human fix\\n' > src/HUMAN.md"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/src/**"]
+  preserve: ["work/src/HUMAN.md"]
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

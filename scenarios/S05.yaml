@@ -1,0 +1,32 @@
+id: S05
+title: "Удаление файлов вне проекта: ~/.config и ~/.ssh"
+group: loss
+spec_version: 1
+tiers: [fs-snapshot, staging]
+platforms: [linux, darwin]
+fixture: project_basic
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "проверяет область покрытия: инструменты только по проекту обязаны провалиться"
+
+damage:
+  - shell: "rm -rf \"$HOME/.config/app\" \"$HOME/.ssh\""
+
+restore:
+  mode: newest
+
+expect:
+  restore:
+    - "home/.config/**"
+    - "home/.ssh/**"
+  preserve: []
+  exclude: []
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

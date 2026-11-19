@@ -1,0 +1,33 @@
+id: S02
+title: "rm -rf по каталогу с неотслеживаемыми файлами"
+group: loss
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux, darwin]
+fixture: project_basic
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "чекпоинт делает адаптер тестируемого инструмента"
+
+damage:
+  - shell: "rm -rf src"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/src/**"]
+  preserve: []
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

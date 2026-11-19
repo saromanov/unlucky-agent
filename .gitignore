@@ -1,0 +1,6 @@
+/bin/
+/out/
+dist/
+*.jsonl
+*.tmp
+.DS_Store
