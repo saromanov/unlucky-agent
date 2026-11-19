@@ -56,16 +56,21 @@ fi
 
 if gh repo view "$OWNER/$NAME" >/dev/null 2>&1; then
 	log "repository exists: $OWNER/$NAME"
-	if ! git remote get-url origin >/dev/null 2>&1; then
-		git remote add origin "git@github.com:$OWNER/$NAME.git"
-	fi
-	git push -u origin HEAD:main || fatal "push failed"
 else
 	log "creating repository $OWNER/$NAME"
-	gh repo create "$OWNER/$NAME" --public --source=. --remote=origin --push \
+	# Publish over HTTPS: no SSH key is configured for GitHub on this host.
+	gh repo create "$OWNER/$NAME" --public \
 		--description "Reproducible crash-test bench for AI agent rollback tools" \
 		|| fatal "repository creation failed"
 fi
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+	git remote add origin "https://github.com/$OWNER/$NAME.git"
+else
+	git remote set-url origin "https://github.com/$OWNER/$NAME.git"
+fi
+git config --local credential.helper '!gh auth git-credential'
+git push -u origin HEAD:main || fatal "push failed"
 
 existing="$(gh issue list --repo "$OWNER/$NAME" --state all --limit 200 \
 	--json title --jq '.[].title' || true)"
