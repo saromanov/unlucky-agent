@@ -64,10 +64,10 @@ docs                   design documents
 
 ## Docs
 
-- [ТЗ, technical requirements](docs/TZ.md) — Russian.
-- [Архитектура](docs/ARCHITECTURE.md) — Russian.
+- [Architecture](docs/ARCHITECTURE.md)
+- Scenario catalog: `scenarios/` and the issue tracker.
 
-Design documents are kept in Russian; code, README and issues are in English.
+The technical requirements document is maintained outside the repository.
 
 ## Safety
 

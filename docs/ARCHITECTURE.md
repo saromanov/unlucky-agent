@@ -1,41 +1,44 @@
-# unlucky-agent — архитектура
+# unlucky-agent — architecture
 
-Версия документа: 0.1 (draft)
-Язык реализации: Go.
+Document version: 0.2
+Implementation language: Go.
 
 ---
 
-## 1. Цели архитектуры
+## 1. Architecture goals
 
-1. **Детерминизм.** Один и тот же вход даёт один и тот же вердикт. Всё недетерминированное
-   вынесено в изолированные адаптеры и помечено в отчёте.
-2. **Изоляция.** Разрушительные команды исполняются только внутри контейнера; ядро стенда
-   физически не имеет пути выполнить их на хосте.
-3. **Расширяемость без пересборки ядра.** Новый сценарий — YAML. Новый инструмент — отдельный
-   процесс-адаптер.
-4. **Потоковость.** Манифест 50k файлов пишется потоком, без загрузки дерева в память.
-5. **Доказуемость.** Каждый вердикт восстановим из артефактов прогона.
+1. **Determinism.** The same input must give the same verdict. Everything non-deterministic is
+   pushed into isolated adapters and marked in the report.
+2. **Isolation.** Destructive commands run only inside a container; the bench core must have no
+   code path that can execute them on the host.
+3. **Extension without rebuilding the core.** A new scenario is YAML. A new tool is a separate
+   adapter process.
+4. **Streaming.** A manifest of 50k files is written as a stream, without loading the tree into
+   memory.
+5. **Provability.** Every verdict can be reconstructed from the run artifacts.
 
-## 2. Стек
+## 2. Stack
 
-- **Go 1.24+**, статическая сборка, CGO отключён по умолчанию (`CGO_ENABLED=0`).
-- **CLI:** `spf13/cobra` (подкоманды, флаги, генерация справки).
-- **Конфигурация сценариев:** `gopkg.in/yaml.v3` со строгим режимом (`KnownFields(true)`),
-  чтобы опечатка в поле сценария была ошибкой, а не тихим дефолтом.
-- **ФС-примитивы:** `io/fs`, `path/filepath`, `golang.org/x/sys/unix` (`Lstat`, `Stat_t`,
-  `Listxattr`, `Flock`, `Ftruncate`).
-- **Хеши:** `crypto/sha256` для идентичности, `golang.org/x/crypto/blake2b` для скорости
-  хеширования крупных файлов. Выбор фиксируется в заголовке манифеста.
-- **Docker:** на MVP — вызов CLI `docker` через `os/exec` с таймаутом и контекстом.
-  Причина: меньше зависимостей, стабильный контракт, проще отладка. Интерфейс `sandbox.Driver`
-  позволяет позже заменить на `github.com/docker/docker/client` без изменения ядра.
-- **Шаблоны отчёта:** `text/template`. JSON — `encoding/json` со схемой.
-- **Тесты:** стандартный `testing`, table-driven, golden-файлы, `go test -race`.
-- **Сборка:** Makefile + GoReleaser для релизов.
+- **Go 1.24+**, static build, CGO disabled by default (`CGO_ENABLED=0`).
+- **CLI:** `spf13/cobra` (subcommands, flags, generated help). The current skeleton uses the
+  standard `flag` package; migration is a separate task.
+- **Scenario config:** `gopkg.in/yaml.v3` with strict mode (`KnownFields(true)`), so a typo in a
+  scenario field is an error instead of a silent default.
+- **Filesystem primitives:** `io/fs`, `path/filepath`, `golang.org/x/sys/unix` (`Lstat`,
+  `Stat_t`, `Listxattr`, `Flock`, `Ftruncate`).
+- **Hashes:** `crypto/sha256` for identity, `golang.org/x/crypto/blake2b` for throughput on large
+  files. The choice is recorded in the manifest header.
+- **Docker:** for the MVP, the `docker` CLI is invoked through `os/exec` with a context and a
+  timeout. Rationale: fewer dependencies, a stable contract, easier debugging. The
+  `sandbox.Driver` interface allows a later switch to `github.com/docker/docker/client` without
+  touching the core.
+- **Report templates:** `text/template`. JSON uses `encoding/json` with a schema.
+- **Tests:** standard `testing`, table-driven, golden files, `go test -race`.
+- **Build:** Makefile plus GoReleaser for releases.
 
-Запрещённые зависимости: тяжёлые ORM, любые библиотеки, требующие cgo для базового сценария.
+Forbidden dependencies: heavy ORMs, and any library that requires cgo for the base scenario.
 
-## 3. Схема компонентов
+## 3. Component diagram
 
 ```
                         ┌──────────────────────────────┐
@@ -71,33 +74,33 @@
                     └─────────────────┘
 ```
 
-## 4. Раскладка репозитория
+## 4. Repository layout
 
 ```
 unlucky-agent/
-  cmd/crashtest/main.go          # тонкий main, вызов internal/cli
+  cmd/unlucky-agent/main.go      # thin main, delegates to internal/cli
   internal/
-    cli/                         # cobra-команды
-    scenario/                    # модель, парсер, валидатор, версии
-    fixture/                     # генераторы фикстур, seed
+    cli/                         # cobra commands
+    scenario/                    # model, parser, validator, versions
+    fixture/                     # fixture generators, seed
     sandbox/                     # driver, guard, canary, limits, exec
-    runner/                      # план прогона, исполнение, ретраи, шардирование
-    adapter/                     # клиент протокола, реестр адаптеров
-    oracle/                      # манифест, capture, diff, policy
-    metrics/                     # расчёт метрик
+    runner/                      # run plan, execution, retries, sharding
+    adapter/                     # protocol client, adapter registry
+    oracle/                      # manifest, capture, diff, policy
+    metrics/                     # metric computation
     report/                      # json, markdown, schema
-    shim/                        # cmdshim и barrier для сценариев
-    version/                     # версия, отпечаток прогона
-  adapters/                      # встроенные адаптеры (подкоманды)
+    shim/                        # cmdshim and barriers for scenarios
+    version/                     # version, run fingerprint
+  adapters/                      # built-in adapters (subcommands)
     gitstash/
     cpr/
     tar/
     fssnapshot/
-    perfect/                     # эталонная заглушка для проверки оракула
-    gitcheckpoint/               # shadow-git инструменты (T1)
-  scenarios/                     # S01..S22 в YAML
-  schema/                        # JSON Schema отчёта и манифеста (go:embed)
-  testdata/                      # golden-файлы, синтетические деревья
+    perfect/                     # reference stub that validates the oracle
+    gitcheckpoint/               # shadow-git tools (T1)
+  scenarios/                     # S01..S22 in YAML
+  schema/                        # JSON Schemas for report and manifest (go:embed)
+  testdata/                      # golden files, synthetic trees
   docker/                        # Dockerfile.base, Dockerfile.tools
   docs/
   Makefile
@@ -105,28 +108,28 @@ unlucky-agent/
   go.sum
 ```
 
-## 5. Модель данных ядра
+## 5. Core data model
 
 ```go
 type Scenario struct {
-    ID         string
-    Title      string
-    Group      Group          // loss | meta | semantics | failure | cost | safety
+    ID          string
+    Title       string
+    Group       Group          // loss | meta | semantics | failure | cost | safety
     SpecVersion int
-    Tiers      []Tier
-    Platforms  []Platform
-    Fixture    string
-    Seed       int64
-    Checkpoint CheckpointSpec
-    Damage     []DamageStep
-    Restore    RestoreSpec
-    Expect     ExpectSpec
-    Limits     Limits
-    Resources  Resources
+    Tiers       []Tier
+    Platforms   []Platform
+    Fixture     string
+    Seed        int64
+    Checkpoint  CheckpointSpec
+    Damage      []DamageStep
+    Restore     RestoreSpec
+    Expect      ExpectSpec
+    Limits      Limits
+    Resources   Resources
 }
 
 type DamageStep struct {
-    Kind    StepKind // shell | toolcall | barrier | signal | fill_disk
+    Kind    StepKind // shell | post_edit | toolcall | barrier | signal | fill_disk
     Shell   string
     Tool    *ToolCall
     Barrier string
@@ -143,7 +146,7 @@ type ExpectSpec struct {
 type Verdict string // PASS | FAIL | SKIPPED_PLATFORM | SKIPPED_UNSUPPORTED | ERROR | FLAKY
 ```
 
-Манифест не держится в памяти целиком:
+A manifest is never held in memory as a whole:
 
 ```go
 type Entry struct {
@@ -163,40 +166,39 @@ type Entry struct {
 }
 ```
 
-Съёмка идёт в `bufio.Writer` поверх временного файла, записи сортируются по путям. Для
-сортировки без загрузки в память при очень больших деревьях используется обход в порядке,
-естественном для `filepath.WalkDir`, плюс пост-сортировка чанками: 50k путей удерживаются
-в памяти (порядка 10 МБ), порог переключения на внешнюю сортировку — 1 млн записей.
+Capture writes into a `bufio.Writer` over a temporary file, entries are sorted by path. For very
+large trees the plan is an external sort; the switch threshold is 1 million entries, in-memory
+buffering is used below it (50k paths take roughly 10 MB).
 
-## 6. Протокол адаптеров
+## 6. Adapter protocol
 
-Адаптер — отдельный исполняемый файл, найденный по имени в `adapters.yaml` или в `PATH`
-как `crashtest-adapter-<id>`. Встроенные адаптеры доступны как `crashtest adapter <id>`.
+An adapter is a separate executable, discovered by name in `adapters.yaml` or in `PATH` as
+`crashtest-adapter-<id>`. Built-in adapters are also available as `unlucky-agent adapter <id>`.
 
-Транспорт: построчный JSON-RPC 2.0 через stdin/stdout, UTF-8, один объект на строку.
-stderr — логи, не парсится.
+Transport: line-delimited JSON-RPC 2.0 over stdin/stdout, UTF-8, one object per line. stderr is
+for logs and is never parsed.
 
-Методы:
+Methods:
 
 - `handshake` → `{protocol: 1, id, tier, version, caps: ["checkpoint","restore","attribution","outside_project"]}`
-- `prepare` `{ctx: SandboxCtx}` → `{}` — адаптер инициализирует своё хранилище внутри песочницы.
-- `checkpoint` `{label}` → `{checkpoint_id, at_unix_nano}` — создать точку восстановления.
-- `restore` `{checkpoint_id, mode}` → `{restored: bool, notes}` — выполнить откат.
+- `prepare` `{ctx: SandboxCtx}` → `{}` — the adapter initializes its storage inside the sandbox.
+- `checkpoint` `{label}` → `{checkpoint_id, at_unix_nano}` — create a restore point.
+- `restore` `{checkpoint_id, mode}` → `{restored: bool, notes}` — perform the rollback.
 - `attribution` `{since_checkpoint}` → `[{path, level, command}]`.
-- `teardown` `{}` — освободить ресурсы, удалить служебные каталоги.
+- `teardown` `{}` — release resources and remove service directories.
 
-Правила:
+Rules:
 
-- адаптер не имеет сетевого доступа;
-- адаптер обязан быть идемпотентным при повторном `restore` на тот же `checkpoint_id`
-  (иначе сценарий S15 фиксирует провал);
-- адаптер не может быть интерактивным: запрещено читать stdin вне протокола;
-- версия протокола несовместима → `ERROR` с явным сообщением, не тихий skip.
+- the adapter has no network access;
+- the adapter must be idempotent when `restore` is repeated for the same `checkpoint_id`,
+  otherwise scenario S15 records a failure;
+- the adapter must never be interactive: reading stdin outside the protocol is forbidden;
+- an incompatible protocol version is an explicit `ERROR`, never a silent skip.
 
-`SandboxCtx` содержит только пути внутри контейнера: `WorkDir`, `HomeDir`, `ScratchDir`,
+`SandboxCtx` contains only in-container paths: `WorkDir`, `HomeDir`, `ScratchDir`,
 `EvidenceDir`, `ToolchainDirs`.
 
-Реестр:
+Registry:
 
 ```yaml
 # adapters.yaml
@@ -208,29 +210,29 @@ adapters:
     image_digest: "sha256:..."
   - id: btrfs-snapshot
     tier: fs-snapshot
-    binary: crashtest-adapter-btrfs
+    binary: unlucky-agent-adapter-btrfs
     requires: {fs: btrfs, root: true}
 ```
 
-Версия адаптера попадает в отпечаток прогона. Несовпадение `version_pin` с фактической
-версией — `ERROR`, а не предупреждение.
+The adapter version is part of the run fingerprint. A mismatch between `version_pin` and the
+actual version is an `ERROR`, not a warning.
 
-## 7. Песочница
+## 7. Sandbox
 
-### 7.1. Раскладка внутри контейнера
+### 7.1. Layout inside the container
 
 ```
-/sandbox/work       # проект, рабочая копия фикстуры
-/sandbox/home       # эфемерный HOME (tmpfs), содержит ~/.config, ~/.ssh и т.п.
-/sandbox/scratch    # крупные файлы, отдельный том с квотой
-/sandbox/evidence   # единственный bind с хоста, rw, создан стендом
-/opt/tools          # образы тестируемых инструментов, только чтение
+/sandbox/work       # project, a working copy of the fixture
+/sandbox/home       # ephemeral HOME (tmpfs), holds ~/.config, ~/.ssh and similar
+/sandbox/scratch    # large files, a separate volume with a quota
+/sandbox/evidence   # the only host bind mount, rw, created by the bench
+/opt/tools          # images of the tools under test, read-only
 ```
 
-Хостовые монтирования: только `/sandbox/evidence`. Всё остальное — tmpfs или named volume,
-удаляемый после прогона.
+Host mounts: only `/sandbox/evidence`. Everything else is tmpfs or a named volume removed after
+the run.
 
-### 7.2. Параметры запуска
+### 7.2. Run parameters
 
 ```
 docker run --rm
@@ -246,159 +248,167 @@ docker run --rm
   --mount type=bind,src=<fixture>,dst=/sandbox/work
 ```
 
-`scratch` создаётся как отдельный volume с `size=` (tmpfs) либо как каталог в `work`,
-если сценарий не требует квоты.
+`scratch` is a separate volume with `size=` (tmpfs), or a directory inside `work` when the
+scenario does not need a quota.
 
 ### 7.3. Guard
 
-Перед запуском сценария `sandbox.Guard` выполняет внутри контейнера проверки:
+Before a scenario starts, `sandbox.Guard` runs these checks inside the container:
 
-1. корень ФС — контейнерный (`/.dockerenv` существует, либо в `/proc/self/mountinfo` нет
-   хостового rootfs);
-2. `$HOME` — внутри `/sandbox/home`;
-3. в mountinfo нет хостовых путей, кроме `/sandbox/evidence`;
-4. uid процесса — 1000;
-5. `work` и `home` не являются симлинками на хостовые пути.
+1. the filesystem root is a container root (`/.dockerenv` exists, or `/proc/self/mountinfo` shows
+   no host rootfs);
+2. `$HOME` points inside `/sandbox/home`;
+3. mountinfo contains no host paths except `/sandbox/evidence`;
+4. the process uid is 1000;
+5. `work` and `home` are not symlinks to host paths.
 
-Любой провал — отказ запуска с кодом `GUARD_FAILED`. Guard исполняется до первой
-разрушительной команды, а не после.
+Any failure aborts the run with `GUARD_FAILED`. The guard runs before the first destructive
+command, never after.
 
 ### 7.4. Canary
 
-До прогона стенд создаёт на хосте набор маркеров (в `$HOME`, `/tmp`, `<out>/canary`) с
-известным содержимым и хешами. После прогона проверяется неизменность. Провал — критическая
-ошибка в отчёте и ненулевой код выхода, даже если все сценарии PASS.
+Before a run the bench creates a set of markers on the host (in `$HOME`, `/tmp`, `<out>/canary`)
+with known content and hashes. After the run it verifies they are unchanged. A failure is a
+critical error in the report and a non-zero exit code, even if every scenario passed.
 
-### 7.5. Таймауты и kill
+### 7.5. Timeouts and kill
 
-Каждый шаг порчи и откат исполняются с `context.WithTimeout`. По истечении — `docker kill`,
-сбор логов, статус `ERROR` с причиной `timeout`. Процесс-адаптер получает SIGKILL, стенд
-не ждёт корректного завершения.
+Every damage step and every restore runs under `context.WithTimeout`. On expiry the bench issues
+`docker kill`, collects logs and reports `ERROR` with reason `timeout`. The adapter process
+receives SIGKILL; the bench does not wait for a graceful shutdown.
 
-## 8. Исполнение сценария
+## 8. Scenario execution
 
-Последовательность для одной пары «сценарий × инструмент»:
+The sequence for one scenario × tool pair:
 
-1. **Plan.** Валидация сценария, проверка платформы и возможностей адаптера из `handshake`.
-   Несовместимость → `SKIPPED_UNSUPPORTED` с причиной.
-2. **Materialize.** Создание фикстуры по seed в пустом каталоге, вычисление ожидаемого
-   манифеста `M0`.
-3. **Start.** Запуск контейнера, guard, canary-базлайн.
+1. **Plan.** Validate the scenario, check the platform and the adapter capabilities from
+   `handshake`. An incompatibility yields `SKIPPED_UNSUPPORTED` with a reason.
+2. **Materialize.** Build the fixture from the seed in an empty directory and capture the expected
+   manifest `M0`.
+3. **Start.** Start the container, run the guard, establish the canary baseline.
 4. **Prepare.** `adapter.prepare`.
-5. **Checkpoint.** `adapter.checkpoint("T")`, снятие эталонного манифеста `MT`.
-6. **Damage.** Выполнение шагов порчи по порядку. Каждый шаг пишется в журнал с таймингом.
-7. **Damage manifest.** Снятие `MD` — подтверждение, что состояние действительно разрушено.
-   Если `MD == MT`, сценарий дефектный → `ERROR(no_damage)`. Это защита от «зелёного»
-   бенчмарка, который ничего не ломает.
-8. **Restore.** `adapter.restore(cp, mode)` с таймаутом, замер времени.
-9. **Final manifest.** Снятие `MF`.
-10. **Compare.** Оракул строит diff `MT → MF` и проверяет `preserve`.
-11. **Attribution.** Если сценарий требует — `adapter.attribution`.
-12. **Teardown.** `adapter.teardown`, остановка контейнера, выгрузка evidence.
-13. **Record.** Запись результата и метрик.
+5. **Checkpoint.** `adapter.checkpoint("T")` and capture the reference manifest `MT`.
+6. **Damage.** Execute the damage steps in order. Every step is journaled with timing.
+7. **Damage manifest.** Capture `MD`, confirming the state was actually destroyed. If
+   `MD == MT`, the scenario is defective and yields `ERROR(no_damage)`. This protects against a
+   green benchmark that destroys nothing.
+8. **Restore.** `adapter.restore(cp, mode)` with a timeout, measuring duration.
+9. **Final manifest.** Capture `MF`.
+10. **Compare.** The oracle diffs `MT → MF` and checks `preserve`.
+11. **Attribution.** When the scenario requires it, `adapter.attribution`.
+12. **Teardown.** `adapter.teardown`, stop the container, export evidence.
+13. **Record.** Persist the result and the metrics.
 
-Между шагами 6 и 7 для конкурентных сценариев используются barrier-файлы.
+For concurrent scenarios the steps between 6 and 7 are coordinated through barrier files.
 
-## 9. Порча и детерминизм
+## 9. Damage and determinism
 
-### 9.1. Два режима
+### 9.1. Two modes
 
-- **scripted** (по умолчанию) — шаги заданы в YAML. Детерминированно, воспроизводимо,
-  используется в рейтинге.
-- **agentic** — реальный агент с LLM выполняет свободную задачу. Помечается
-  `non_reproducible`, в рейтинг не входит, нужен для демонстрации реалистичности.
+- **scripted** (default): steps are defined in YAML. Deterministic and reproducible; used for the
+  rating.
+- **agentic**: a real LLM agent performs a free-form task. Marked `non_reproducible`, excluded
+  from the rating, used to demonstrate realism.
 
-Порча в scripted-режиме всё равно проходит через тот же интерфейс, что и у агента: либо
-`shell` (оболочка внутри контейнера), либо `toolcall` (через `cmdshim`).
+Even in scripted mode, damage goes through the same interface as an agent's: either `shell` (a
+shell inside the container) or `toolcall` (through `cmdshim`).
 
 ### 9.2. cmdshim
 
-`cmdshim` — бинарник стенда, положенный первым в `PATH` внутри контейнера. Режимы:
+`cmdshim` is a bench binary placed first in `PATH` inside the container. Modes:
 
-- `cmdshim exec -- <cmd>` — исполняет команду как shell-вызов, пишет журнал;
-- `cmdshim tool <name> --json <args>` — исполняет вызов «инструмента агента» и пишет журнал
-  с признаком `via=tool`.
+- `cmdshim exec -- <cmd>` — executes the command as a shell invocation and journals it;
+- `cmdshim tool <name> --json <args>` — executes an "agent tool" call and journals it with
+  `via=tool`.
 
-Различие `via=shell` против `via=tool` — основа сценария S10: инструменты, слушающие только
-хуки инструмента, обязаны провалить мутации через shell.
+The `via=shell` versus `via=tool` distinction is the basis of scenario S10: tools that only
+listen to agent hooks must fail mutations issued through a shell.
 
-### 9.3. Barrier
+### 9.3. Barriers
 
-`shim/barrier` — примитив синхронизации на файлах и `unix.Flock`. Сценарии с двумя сессиями
-и с torn state используют именованные барьеры: «сессия A дошла до точки X», «сессия B начала
-писать». Без барьеров такие сценарии недетерминированы и уходят в FLAKY.
+`shim/barrier` provides synchronization on files and `unix.Flock`. Two-session and torn-state
+scenarios use named barriers: "session A reached point X", "session B started writing". Without
+barriers such scenarios are non-deterministic and become FLAKY.
 
-### 9.4. Управление временем и окружением
+### 9.4. Time and environment control
 
-Фиксируется: `TZ=UTC`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `SOURCE_DATE_EPOCH`, seed для
-генератора фикстур. Время модификации файлов фикстуры задаётся явно (`unix.UtimesNanoAt`),
-чтобы `meta_strict` был стабилен между прогонами.
+Fixed values: `TZ=UTC`, `LANG=C.UTF-8`, `LC_ALL=C.UTF-8`, `SOURCE_DATE_EPOCH`, and the fixture
+seed. Fixture file modification times are set explicitly (`unix.UtimesNanoAt`) so that
+`meta_strict` is stable across runs.
 
-## 10. Оракул
+## 10. Oracle
 
-### 10.1. Съёмка
+### 10.1. Capture
 
 ```
 Walk(root):
-  Lstat (без следования symlink)
-  для regular: hash blake2b-256 потоком, буфер 1 МиБ
-  blocks = st.Blocks (разреженность)
-  xattr = Listxattr/Getxattr, ошибка EOPNOTSUPP → флаг unsupported
-  mode = st.Mode, uid/gid из Stat_t
+  Lstat (without following symlinks)
+  for a regular file: streaming blake2b-256, 1 MiB buffer
+  blocks = st.Blocks (sparseness)
+  xattr = Listxattr/Getxattr; EOPNOTSUPP sets an unsupported flag
+  mode = st.Mode, uid/gid from Stat_t
 ```
 
-Параллелизм: worker pool по `GOMAXPROCS`, но запись строго последовательная и
-отсортированная. Порядок обхода детерминирован: сортировка имён по байтам.
+Concurrency: a worker pool sized by `GOMAXPROCS`, while writes stay strictly sequential and
+sorted. Traversal order is deterministic: names are sorted by bytes.
 
-Хеширование 2 ГБ не должно съедать память: только потоковые буферы.
+Hashing a 2 GiB file must not consume memory: streaming buffers only.
 
 ### 10.2. Diff
 
-`oracle.Diff(base, observed, policy)` возвращает:
+`oracle.Diff(base, observed, policy)` returns:
 
 ```go
 type Diff struct {
-    Missing   []Path   // было в base, нет в observed
-    Added     []Path   // появилось (не всегда ошибка)
-    Changed   []Path   // хеш или метаданные отличаются
-    MetaOnly  []Path   // содержимое совпало, метаданные нет
-    Clobbered []Path   // входит в preserve и изменилось
+    Missing   []Path   // present in base, absent in observed
+    Added     []Path   // appeared; not always an error
+    Changed   []Path   // content hash or type differs
+    MetaOnly  []Path   // content matches, metadata does not
+    Clobbered []Path   // belongs to preserve and changed
 }
 ```
 
-Память: diff по двум отсортированным потокам (merge-join), без построения двух карт на
-50k+ файлов. Для 50k это не критично, но алгоритм сразу рассчитан на миллионы записей.
+Memory: a merge-join over two sorted streams, without building two maps of 50k+ entries. At 50k
+this does not matter, but the algorithm is designed for millions from the start.
 
 ### 10.3. Policy
 
-Политика — набор правил, полученных из сценария и платформы:
+A policy is a set of rules derived from the scenario and the platform:
 
-- `Exclude(glob)` — исключить из сравнения;
-- `RequireMeta(bool)` — включать ли meta в гейт;
-- `AllowAddedUnder(glob)` — какие новые пути допустимы (например, служебные каталоги);
-- `Preserve(glob)` — что обязано выжить.
+- `Exclude(glob)` — remove from comparison;
+- `RequireMeta(bool)` — whether metadata is part of the gate;
+- `AllowAddedUnder(glob)` — which new paths are allowed (service directories, for example);
+- `Preserve(glob)` — what must survive.
 
-Политика — чистые данные, сериализуется в отчёт. Это позволяет пересчитать вердикт по
-сохранённым манифестам без повторного прогона (`crashtest report --from <artifacts>`).
+A policy is pure data and is serialized into the report. This allows a verdict to be recomputed
+from saved manifests without rerunning the scenario (`unlucky-agent report --from <artifacts>`).
 
-## 11. Метрики
+## 11. Metrics
 
-`internal/metrics` получает `Diff` и тайминги, возвращает структуру метрик из ТЗ, раздел 8.
-Формулы реализуются в одном месте, чтобы отчёт и JSON не расходились.
+`internal/metrics` takes a `Diff` plus timings and returns the metric structure. Formulas live in
+one place so the report and the JSON never disagree.
 
-Агрегация по 5 прогонам: медиана для таймингов, консенсус для вердикта; расхождение
-вердиктов → `FLAKY`, сценарий исключается из рейтинга и попадает в отдельный раздел.
+Aggregation over five runs: median for timings, consensus for the verdict. Divergent verdicts
+yield `FLAKY`; the scenario is excluded from the rating and listed in a separate section.
 
-## 12. Отчёт
+Published metrics: recall, content precision, metadata score, strict metadata score, clobbered
+count, coverage vector by action class, p50/p95 added latency per agent tool call, checkpoint and
+restore time, disk delta and peak disk, attribution level, flaky rate.
 
-- `report/json` — структура, сериализуемая в `encoding/json`, проверяется JSON Schema из
-  `schema/report.v1.json` (schema встроена через `go:embed`, тест валидирует golden-отчёт).
-- `report/markdown` — `text/template`, детерминированный вывод (сортировка всех списков).
-- `crashtest reproduce <report.json>` — читает отпечаток, проверяет доступность образа и
-  адаптеров, запускает тот же набор и сравнивает вердикты. Расхождение — отчёт «не
-  воспроизвелось» с указанием, что именно разошлось.
+There is no single aggregate score. A single number hides class boundaries and turns a
+capability table into a leaderboard.
 
-Отпечаток прогона:
+## 12. Report
+
+- `report/json` — a struct serialized with `encoding/json`, validated against
+  `schema/report.v1.json` (the schema is embedded via `go:embed`; a test validates a golden
+  report).
+- `report/markdown` — `text/template`, deterministic output (every list is sorted).
+- `unlucky-agent reproduce <report.json>` — reads the fingerprint, checks that the image and the
+  adapters are available, reruns the same matrix and compares verdicts. A divergence produces a
+  "not reproduced" report naming exactly what diverged.
+
+Run fingerprint:
 
 ```go
 type Fingerprint struct {
@@ -413,61 +423,61 @@ type Fingerprint struct {
 }
 ```
 
-## 13. Сборка и поставка
+## 13. Build and delivery
 
 ```
 make build     # go build -trimpath -ldflags "-s -w -X ...version"
 make test      # go test -race ./...
-make lint      # gofmt -l, go vet, staticcheck (опционально)
+make lint      # gofmt -l, go vet, staticcheck (optional)
 make images    # docker buildx build base + tools
-make e2e       # прогон MVP-матрицы в контейнере
+make e2e       # run the MVP matrix in a container
 make release   # goreleaser
 ```
 
-Артефакты релиза: `crashtest` под linux/amd64, linux/arm64, darwin/arm64; SHA256SUMS;
-SBOM; образ `ghcr.io/<org>/crashtest-base:<version>` с закреплённым digest.
+Release artifacts: `unlucky-agent` for linux/amd64, linux/arm64, darwin/arm64; SHA256SUMS; SBOM;
+image `ghcr.io/<org>/unlucky-agent-base:<version>` with a pinned digest.
 
-Версионирование:
+Versioning:
 
-- `crashtest` — semver;
-- спецификация сценариев — целое `spec_version`, повышается при любом изменении семантики
-  сценария или оракула;
-- схема отчёта и манифеста — отдельные целые, повышаются при несовместимом изменении полей.
+- `unlucky-agent` follows semver;
+- the scenario specification uses an integer `spec_version`, bumped on any semantic change to
+  scenarios or the oracle;
+- the report and manifest schemas use separate integers, bumped on incompatible field changes.
 
-Несовместимое изменение сценария обнуляет сравнимость результатов: старые отчёты помечаются
-`outdated`, не смешиваются с новыми.
+An incompatible scenario change invalidates comparability: old reports are marked `outdated` and
+are never mixed with new ones.
 
-## 14. Тестовая стратегия
+## 14. Test strategy
 
-- **Unit.** Парсер сценариев (включая ошибки: неизвестное поле, неизвестный глоб), diff
-  (синтетические деревья в `testdata`), policy, метрики, шаблоны отчёта (golden).
-- **Integration.** Генераторы фикстур → манифест → diff на реальной ФС, без Docker.
-  Проверяются метаданные: симлинки, права, разреженные файлы, xattr.
-- **Sandbox.** Guard и canary на контейнере; тест «guard отказывает при bind-mount хоста»
-  реализуется намеренно сломанной конфигурацией.
-- **E2E.** MVP-матрица на `cp-r` и `perfect`: `perfect` обязан проходить всё, `none` —
-  проваливать всё. Это проверка оракула.
-- **Race и флаки.** `go test -race`, пять повторов E2E в CI, любой расходящийся вердикт —
-  падение сборки.
+- **Unit.** Scenario parser (including errors: unknown field, unknown glob), diff (synthetic
+  trees in `testdata`), policy, metrics, report templates (golden).
+- **Integration.** Fixture generators → manifest → diff on a real filesystem, without Docker.
+  Metadata is covered: symlinks, permissions, sparse files, xattr.
+- **Sandbox.** Guard and canary on a container; the "guard refuses a host bind mount" test is
+  implemented with a deliberately broken configuration.
+- **E2E.** The MVP matrix against `cp-r` and `perfect`: `perfect` must pass everything, `none`
+  must fail everything. This validates the oracle.
+- **Race and flakiness.** `go test -race`, five E2E repetitions in CI, and any divergent verdict
+  fails the build.
 
-## 15. Наблюдаемость
+## 15. Observability
 
-- Структурные логи в stderr ядра (`slog`), JSON, уровень `-v`.
-- Каждый шаг прогона — событие с длительностью.
-- Журнал порчи сохраняется в evidence (`damage.log`): команда, время, код возврата.
-- Логи адаптера — отдельный файл на прогон, не смешивается с ядром.
+- Structured logs on stderr (`slog`), JSON format, `-v` for verbosity.
+- Every run step is an event with a duration.
+- The damage journal is stored in evidence (`damage.log`): command, time, exit code.
+- Adapter logs go to a separate file per run and never mix with the core.
 
-## 16. Точки расширения
+## 16. Extension points
 
-1. **Сценарий** — YAML, без кода.
-2. **Адаптер** — внешний процесс, любой язык.
-3. **Фикстура** — Go-генератор, регистрируется в `fixture` по имени.
-4. **Дорожка** — добавляется значением `tier` и правилом сравнения в policy.
-5. **Отчёт** — новый формат через интерфейс `report.Writer`.
+1. **Scenario** — YAML, no code.
+2. **Adapter** — external process, any language.
+3. **Fixture** — a Go generator registered in `fixture` by name.
+4. **Tier** — added as a `tier` value plus a comparison rule in the policy.
+5. **Report** — a new format through the `report.Writer` interface.
 
-## 17. Что явно не делаем в v1.0
+## 17. Explicitly out of scope for v1.0
 
-- Веб-интерфейс и база данных: результаты — файлы в каталоге.
-- Облачный сервис и аккаунты.
-- Сравнение инструментов «в одном workspace одновременно»: прогоны изолированы.
-- Автоматический лидерборд: публикация — вручную, после внешнего воспроизведения.
+- A web UI and a database: results are files in a directory.
+- A cloud service and accounts.
+- Comparing tools inside one workspace simultaneously: runs are isolated.
+- An automatic leaderboard: publication is manual and follows external reproduction.
