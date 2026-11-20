@@ -11,6 +11,11 @@ LOG_DIR="/home/sergey/hub/logs"
 MARKER="unlucky-agent/bootstrap-3am"
 
 export PATH="/usr/local/bin:/usr/bin:/bin:/usr/local/go/bin"
+# Cron starts with a minimal environment: GOPATH must point at the real module
+# cache, otherwise Go tries to download modules from the network.
+export GOPATH="${GOPATH:-/home/sergey/gowork}"
+export GOMODCACHE="$GOPATH/pkg/mod"
+export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 
@@ -19,8 +24,9 @@ remove_cron() {
 }
 
 fatal() {
+	# Keep the crontab entry: the next nightly run retries. Removing it here
+	# would silently lose the bootstrap after a transient failure.
 	log "FATAL: $*"
-	remove_cron
 	exit 1
 }
 
@@ -42,17 +48,11 @@ log "start"
 
 git rev-parse --git-dir >/dev/null 2>&1 || fatal "not a git repository"
 
-if go build ./... >/dev/null 2>&1; then
-	log "build ok"
-else
-	fatal "go build failed"
-fi
+build_log="$(go build ./... 2>&1)" || fatal "go build failed: $build_log"
+log "build ok"
 
-if go test ./... >/dev/null 2>&1; then
-	log "tests ok"
-else
-	fatal "go test failed"
-fi
+test_log="$(go test ./... 2>&1)" || fatal "go test failed: $test_log"
+log "tests ok"
 
 if gh repo view "$OWNER/$NAME" >/dev/null 2>&1; then
 	log "repository exists: $OWNER/$NAME"
