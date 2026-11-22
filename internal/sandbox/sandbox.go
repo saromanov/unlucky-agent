@@ -71,6 +71,13 @@ type CPBaseline interface {
 	CPRestore(ctx context.Context, timeout time.Duration) error
 }
 
+// PerfectBaseline is implemented by drivers that must run the perfect
+// reference rollback inside their own sandbox instead of on the host tree.
+type PerfectBaseline interface {
+	PerfectSnapshot(ctx context.Context, timeout time.Duration) error
+	PerfectRestore(ctx context.Context, timeout time.Duration, preserve []string) error
+}
+
 // GuardFailure converts a list of failed checks into the run error.
 func GuardFailure(checks []string) error {
 	if len(checks) == 0 {

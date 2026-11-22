@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/manifest"
@@ -307,6 +309,78 @@ func (d *Docker) CPRestore(ctx context.Context, timeout time.Duration) error {
 		return fmt.Errorf("docker cp-r restore: %w", err)
 	}
 	return nil
+}
+
+// PerfectSnapshot implements PerfectBaseline: it archives both the work and
+// the home tree at the checkpoint, inside the container.
+func (d *Docker) PerfectSnapshot(ctx context.Context, timeout time.Duration) error {
+	script := "tar -C " + containerWork + " -cf " + containerScratch + "/perfect-work.tar . && " +
+		"tar -C " + containerHome + " -cf " + containerScratch + "/perfect-home.tar ."
+	if _, err := d.Exec(ctx, script, timeout); err != nil {
+		return fmt.Errorf("docker perfect snapshot: %w", err)
+	}
+	return nil
+}
+
+// PerfectRestore implements PerfectBaseline: it wipes both trees, unpacks the
+// snapshots and puts preserved post-T edits back.
+func (d *Docker) PerfectRestore(ctx context.Context, timeout time.Duration, preserve []string) error {
+	script, err := perfectRestoreScript(preserve)
+	if err != nil {
+		return fmt.Errorf("docker perfect restore: %w", err)
+	}
+	if _, err := d.Exec(ctx, script, timeout); err != nil {
+		return fmt.Errorf("docker perfect restore: %w", err)
+	}
+	return nil
+}
+
+// perfectRestoreScript builds the restore script. Preserved paths are
+// manifest-style paths rooted at "work/" or "home/".
+func perfectRestoreScript(preserve []string) (string, error) {
+	paths := make([]string, 0, len(preserve))
+	for _, p := range preserve {
+		var base string
+		var rel string
+		switch {
+		case strings.HasPrefix(p, "work/"):
+			base, rel = containerWork, strings.TrimPrefix(p, "work/")
+		case strings.HasPrefix(p, "home/"):
+			base, rel = containerHome, strings.TrimPrefix(p, "home/")
+		default:
+			return "", fmt.Errorf("unsupported preserve path %q", p)
+		}
+		if rel == "" || strings.Contains(rel, "..") {
+			return "", fmt.Errorf("invalid preserve path %q", p)
+		}
+		paths = append(paths, path.Join(base, rel))
+	}
+
+	keepRoot := containerScratch + "/keep"
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	b.WriteString("rm -rf " + shellQuote(keepRoot) + "\n")
+	for _, p := range paths {
+		kept := path.Join(keepRoot, p)
+		b.WriteString("if [ -e " + shellQuote(p) + " ]; then mkdir -p " + shellQuote(path.Dir(kept)) +
+			" && mv " + shellQuote(p) + " " + shellQuote(kept) + "; fi\n")
+	}
+	b.WriteString("find " + containerWork + " -mindepth 1 -delete\n")
+	b.WriteString("find " + containerHome + " -mindepth 1 -delete\n")
+	b.WriteString("tar -C " + containerWork + " -xf " + shellQuote(containerScratch+"/perfect-work.tar") + "\n")
+	b.WriteString("tar -C " + containerHome + " -xf " + shellQuote(containerScratch+"/perfect-home.tar") + "\n")
+	for _, p := range paths {
+		kept := path.Join(keepRoot, p)
+		b.WriteString("if [ -e " + shellQuote(kept) + " ]; then mkdir -p " + shellQuote(path.Dir(p)) +
+			" && mv " + shellQuote(kept) + " " + shellQuote(p) + "; fi\n")
+	}
+	b.WriteString("rm -rf " + shellQuote(keepRoot) + "\n")
+	return b.String(), nil
+}
+
+// shellQuote single-quotes a path for the container shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // Close removes the container.

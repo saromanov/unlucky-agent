@@ -14,8 +14,9 @@ what a tool adds over the obvious answer.
 ## Status
 
 v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, runner with
-`none` and `cp-r` baselines, plus an optional container sandbox with a pre-flight guard and a
-host canary. The adapter protocol is next.
+`none`, `cp-r` and `perfect` baselines, plus an optional container sandbox with a pre-flight
+guard and a host canary. Scenarios S01 and S03 cover git shadowing of untracked files and
+`git reset --hard`. The adapter protocol is next.
 
 Working name: the repository name may change before the first public release.
 
@@ -25,6 +26,7 @@ Working name: the repository name may change before the first public release.
 make build
 ./bin/unlucky-agent scenarios list
 ./bin/unlucky-agent run -all -dir scenarios -baseline cp-r -out out/cp-r
+./bin/unlucky-agent run -all -dir scenarios -baseline perfect -out out/perfect
 ./bin/unlucky-agent run -all -dir scenarios -baseline none -out out/none
 ```
 
@@ -69,6 +71,11 @@ all scenarios passed.
   metadata are hard gates. `post_edit` paths are checked for clobbering.
 - A scenario passes only when `recall == 1` and `clobbered == 0`.
 
+Supported baselines: `none` (no rollback), `cp-r` (whole-tree copy) and `perfect`.
+`perfect` is the reference rollback used to validate the oracle itself: it snapshots both work
+and home at the checkpoint, restores byte-for-byte, and preserves post-T edits, so it must pass
+every scenario, while `none` must fail every scenario.
+
 ## Layout
 
 ```
@@ -81,7 +88,7 @@ internal/baseline      reference rollback strategies
 internal/runner        scenario execution
 internal/sandbox       local and docker drivers, guard, canary
 internal/report        JSON and Markdown reports
-scenarios              S02, S04, S05, S21
+scenarios              S01, S02, S03, S04, S05, S21
 docker                 sandbox image
 docs                   design documents
 ```

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/baseline"
@@ -168,6 +169,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 
 	cpBase, hasCP := drv.(sandbox.CPBaseline)
+	perfectBase, hasPerfect := drv.(sandbox.PerfectBaseline)
 	var snap string
 	if cfg.Baseline == "cp-r" {
 		if hasCP {
@@ -179,6 +181,17 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			if err := baseline.Snapshot(work, snap); err != nil {
 				return nil, fmt.Errorf("baseline snapshot: %w", err)
 			}
+		}
+	}
+	snapWork := filepath.Join(root, "snapshot-work")
+	snapHome := filepath.Join(root, "snapshot-home")
+	if cfg.Baseline == "perfect" {
+		if hasPerfect {
+			if err := perfectBase.PerfectSnapshot(ctx, cfg.Timeout); err != nil {
+				return nil, fmt.Errorf("baseline snapshot: %w", err)
+			}
+		} else if err := baseline.PerfectSnapshot(work, home, snapWork, snapHome); err != nil {
+			return nil, fmt.Errorf("baseline snapshot: %w", err)
 		}
 	}
 
@@ -214,6 +227,30 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		postEditManifest = p
 	}
 
+	pol := oracle.Policy{
+		Exclude:     cfg.Scenario.Expect.Exclude,
+		Preserve:    cfg.Scenario.Expect.Preserve,
+		AllowAdded:  []string{".git/objects/**", ".git/index", ".git/logs/**", ".git/lost-found/**"},
+		Expected:    cfg.Scenario.Expect.Restore,
+		RequireMeta: cfg.Scenario.Expect.Require == "meta",
+	}
+
+	// The perfect baseline must keep the concrete post-T edits, so their
+	// manifest paths are resolved before the restore step.
+	var preserved []string
+	if postEditManifest != "" {
+		entries, err := oracle.LoadEntries(postEditManifest)
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if pol.Preserved(e.Path) {
+				preserved = append(preserved, e.Path)
+			}
+		}
+		sort.Strings(preserved)
+	}
+
 	start = time.Now()
 	switch {
 	case cfg.RestoreCmd != "":
@@ -234,6 +271,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			res.Reason = "restore baseline: " + err.Error()
 			return res, nil
 		}
+	case cfg.Baseline == "perfect":
+		if hasPerfect {
+			if err := perfectBase.PerfectRestore(ctx, cfg.Timeout, preserved); err != nil {
+				res.Verdict = VerdictError
+				res.Reason = "restore baseline: " + err.Error()
+				return res, nil
+			}
+		} else if err := baseline.PerfectRestore(snapWork, snapHome, work, home, preserved); err != nil {
+			res.Verdict = VerdictError
+			res.Reason = "restore baseline: " + err.Error()
+			return res, nil
+		}
 	default:
 		// baseline none: no rollback is performed.
 	}
@@ -244,13 +293,6 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 
-	pol := oracle.Policy{
-		Exclude:     cfg.Scenario.Expect.Exclude,
-		Preserve:    cfg.Scenario.Expect.Preserve,
-		AllowAdded:  []string{".git/objects/**", ".git/index", ".git/logs/**", ".git/lost-found/**"},
-		Expected:    cfg.Scenario.Expect.Restore,
-		RequireMeta: cfg.Scenario.Expect.Require == "meta",
-	}
 	diff, err := oracle.DiffFiles(baseManifest, restoredManifest, pol)
 	if err != nil {
 		return nil, err

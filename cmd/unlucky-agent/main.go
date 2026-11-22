@@ -185,7 +185,7 @@ func printChanges(kind string, changes []oracle.Change) {
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	scenarioPath := fs.String("scenario", "", "scenario file")
-	baselineName := fs.String("baseline", "none", "baseline: none or cp-r")
+	baselineName := fs.String("baseline", "none", "baseline: none, cp-r or perfect")
 	outDir := fs.String("out", "out", "output directory")
 	restoreCmd := fs.String("restore", "", "restore command; overrides the baseline")
 	keep := fs.Bool("keep", false, "keep the temporary directory")
