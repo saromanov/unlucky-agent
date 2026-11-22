@@ -13,8 +13,9 @@ what a tool adds over the obvious answer.
 
 ## Status
 
-v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, local runner
-with `none` and `cp-r` baselines. Container isolation and the adapter protocol are next.
+v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, runner with
+`none` and `cp-r` baselines, plus an optional container sandbox with a pre-flight guard and a
+host canary. The adapter protocol is next.
 
 Working name: the repository name may change before the first public release.
 
@@ -37,6 +38,27 @@ Run against your own rollback command:
   -restore 'tar -xpf /tmp/snapshot.tar' -out out/custom
 ```
 
+## Sandbox
+
+By default commands run through the `local` driver: a plain subprocess on the host. The `docker`
+driver runs every damage and restore command inside a hardened container:
+
+```sh
+make image-sandbox
+./bin/unlucky-agent run -all -dir scenarios -baseline cp-r -sandbox docker -out out/docker
+```
+
+The container uses `--network none`, uid 1000, `--cap-drop ALL`, `--security-opt
+no-new-privileges`, memory and pid limits. The work, home and scratch trees are tmpfs; the
+evidence directory (`<out>/evidence`) is the only host bind. Before the first damage step a
+pre-flight guard verifies the uid, `$HOME`, the `/.dockerenv` marker and every mount in
+`/proc/self/mountinfo`; a disk-backed mount outside `/sandbox/evidence` (and the docker
+`/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` files) refuses the run with `GUARD_FAILED`.
+
+A host canary writes marker files into the temp directory, the output directory and `$HOME` and
+re-hashes them after the run. Any change or removal fails the run with `CANARY_FAILED`, even when
+all scenarios passed.
+
 ## Model
 
 - Scenario (`scenarios/*.yaml`) describes a fixture, a checkpoint point, damage steps and
@@ -57,8 +79,10 @@ internal/oracle        diff, policy, verdicts
 internal/fixture       deterministic fixtures
 internal/baseline      reference rollback strategies
 internal/runner        scenario execution
+internal/sandbox       local and docker drivers, guard, canary
 internal/report        JSON and Markdown reports
 scenarios              S02, S04, S05, S21
+docker                 sandbox image
 docs                   design documents
 ```
 
@@ -71,10 +95,10 @@ The technical requirements document is maintained outside the repository.
 
 ## Safety
 
-v0.1 executes damage commands as a local subprocess inside a temporary directory. It does not
-isolate the host filesystem at the kernel level yet, so only run scenarios you have read. The
-container sandbox with a pre-flight guard and a host canary check is required before any public
-run and is tracked as a separate issue.
+The default `local` driver executes damage commands as a local subprocess inside a temporary
+directory. It does not isolate the host filesystem at the kernel level, so only run scenarios you
+have read. Use `-sandbox docker` for kernel-level isolation together with the pre-flight guard
+and the host canary.
 
 ## License
 
