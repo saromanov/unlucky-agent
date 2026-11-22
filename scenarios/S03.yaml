@@ -1,0 +1,36 @@
+id: S03
+title: "git reset --hard: потеря незакоммиченных правок в отслеживаемых файлах"
+group: loss
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux, darwin]
+fixture: project_git_dirty
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "фикстура с незакоммиченными правками: staged-правка main.go, unstaged-правка util.go и staged-новый файл src/extra.go; reset --hard отбрасывает всё"
+
+damage:
+  - shell: "git reset --hard"
+
+restore:
+  mode: newest
+
+expect:
+  restore:
+    - "work/src/main.go"
+    - "work/src/util.go"
+    - "work/src/extra.go"
+  preserve: []
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

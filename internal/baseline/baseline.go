@@ -7,18 +7,64 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // Names lists the supported baselines.
-func Names() []string { return []string{"none", "cp-r"} }
+func Names() []string { return []string{"none", "cp-r", "perfect"} }
 
 // Snapshot copies the whole tree.
 func Snapshot(src, dst string) error {
 	if err := os.RemoveAll(dst); err != nil {
 		return err
 	}
-	return copyTree(src, dst)
+	return copyTree(src, dst, nil)
+}
+
+// PerfectSnapshot snapshots both the work and the home tree at the checkpoint.
+func PerfectSnapshot(work, home, snapWork, snapHome string) error {
+	if err := Snapshot(work, snapWork); err != nil {
+		return err
+	}
+	return Snapshot(home, snapHome)
+}
+
+// PerfectRestore restores both trees byte-for-byte and keeps post-T edits.
+// Preserved paths are manifest-style paths rooted at "work/" or "home/".
+// Entries with any other prefix are ignored for both trees.
+func PerfectRestore(snapWork, snapHome, work, home string, preserved []string) error {
+	keepWork := make(keepSet)
+	keepHome := make(keepSet)
+	for _, p := range preserved {
+		if rel, ok := strings.CutPrefix(p, "work/"); ok {
+			addKeep(keepWork, rel)
+			continue
+		}
+		if rel, ok := strings.CutPrefix(p, "home/"); ok {
+			addKeep(keepHome, rel)
+		}
+	}
+	trees := []struct {
+		snapshot string
+		dst      string
+		keep     keepSet
+	}{
+		{snapWork, work, keepWork},
+		{snapHome, home, keepHome},
+	}
+	for _, t := range trees {
+		if _, err := os.Stat(t.snapshot); err != nil {
+			return fmt.Errorf("baseline: snapshot: %w", err)
+		}
+		if err := removeExtras(t.snapshot, t.dst, t.keep); err != nil {
+			return err
+		}
+		if err := copyTree(t.snapshot, t.dst, t.keep); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RestoreExact restores the tree from the snapshot and removes extra files.
@@ -27,13 +73,48 @@ func RestoreExact(snapshot, dst string) error {
 	if _, err := os.Stat(snapshot); err != nil {
 		return fmt.Errorf("baseline: snapshot: %w", err)
 	}
-	if err := removeExtras(snapshot, dst); err != nil {
+	if err := removeExtras(snapshot, dst, nil); err != nil {
 		return err
 	}
-	return copyTree(snapshot, dst)
+	return copyTree(snapshot, dst, nil)
 }
 
-func removeExtras(snapshot, dst string) error {
+// keepSet holds tree-relative paths a restore must not delete or overwrite.
+type keepSet map[string]struct{}
+
+func addKeep(set keepSet, rel string) {
+	rel = filepath.Clean(filepath.FromSlash(rel))
+	if rel == "." || rel == "" {
+		return
+	}
+	set[rel] = struct{}{}
+}
+
+// contains reports whether rel is preserved exactly.
+func (k keepSet) contains(rel string) bool {
+	_, ok := k[rel]
+	return ok
+}
+
+// protects reports whether rel is preserved or is an ancestor of a preserved
+// path: a post-edit file may live in a directory the snapshot does not have.
+func (k keepSet) protects(rel string) bool {
+	if len(k) == 0 {
+		return false
+	}
+	if k.contains(rel) {
+		return true
+	}
+	prefix := rel + string(filepath.Separator)
+	for p := range k {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func removeExtras(snapshot, dst string, keep keepSet) error {
 	var extras []string
 	err := filepath.WalkDir(dst, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -44,6 +125,9 @@ func removeExtras(snapshot, dst string) error {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		if keep.protects(rel) {
 			return nil
 		}
 		if _, err := os.Lstat(filepath.Join(snapshot, rel)); err != nil {
@@ -66,7 +150,7 @@ func removeExtras(snapshot, dst string) error {
 	return nil
 }
 
-func copyTree(src, dst string) error {
+func copyTree(src, dst string, keep keepSet) error {
 	type dirMeta struct {
 		path string
 		mode os.FileMode
@@ -99,6 +183,9 @@ func copyTree(src, dst string) error {
 				return err
 			}
 			dirs = append(dirs, dirMeta{path: target, mode: info.Mode().Perm(), at: info.ModTime()})
+			return nil
+		case keep.contains(rel):
+			// A preserved post-T edit must survive the restore untouched.
 			return nil
 		case info.Mode()&os.ModeSymlink != 0:
 			link, err := os.Readlink(p)

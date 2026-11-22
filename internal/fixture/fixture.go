@@ -21,7 +21,7 @@ type file struct {
 // Known reports whether the fixture is registered.
 func Known(name string) bool {
 	switch name {
-	case "project_basic", "project_git":
+	case "project_basic", "project_git", "project_git_dirty":
 		return true
 	}
 	return false
@@ -63,8 +63,13 @@ func Build(name string, seed int64, work, home string) error {
 		}
 	}
 
-	if name == "project_git" {
+	if name == "project_git" || name == "project_git_dirty" {
 		if err := gitInit(work, home, seed); err != nil {
+			return err
+		}
+	}
+	if name == "project_git_dirty" {
+		if err := gitDirty(work, home); err != nil {
 			return err
 		}
 	}
@@ -91,13 +96,7 @@ func gitInit(work, home string, seed int64) error {
 	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Fixture\n\temail = fixture@example.com\n"), 0o600); err != nil {
 		return err
 	}
-	env := append(os.Environ(),
-		"HOME="+home,
-		"GIT_CONFIG_GLOBAL="+gitconfig,
-		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
-		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
-		"TZ=UTC",
-	)
+	env := gitEnv(home)
 	steps := [][]string{
 		{"init", "-q", "-b", "main"},
 		{"add", "README.md", "src/main.go", "src/util.go", "docs/guide.md", "scripts/run.sh", ".gitignore"},
@@ -112,4 +111,43 @@ func gitInit(work, home string, seed int64) error {
 		}
 	}
 	return nil
+}
+
+// gitDirty applies uncommitted edits to a git fixture: one staged edit, one
+// staged new file and one unstaged edit.
+func gitDirty(work, home string) error {
+	edits := []file{
+		// Unstaged edit: never added, so `git reset --hard` reverts it.
+		{"src/util.go", "package main\n\nfunc add(a, b int) int { return a + b }\n\n// local uncommitted edit\n", 0o644},
+		// Staged edit: both the index and the worktree differ from HEAD.
+		{"src/main.go", "package main\n\nfunc main() { println(\"demo, edited\") }\n", 0o644},
+		// Staged new file: `git reset --hard` deletes it.
+		{"src/extra.go", "package main\n\n// staged new file, never committed\n", 0o644},
+	}
+	for _, f := range edits {
+		if err := write(work, f); err != nil {
+			return err
+		}
+	}
+
+	args := []string{"add", "src/main.go", "src/extra.go"}
+	cmd := exec.Command("git", args...)
+	cmd.Dir = work
+	cmd.Env = gitEnv(home)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git %v: %w: %s", args, err, out)
+	}
+	return nil
+}
+
+// gitEnv returns the environment shared by git calls: a fixed identity, fixed
+// dates and a home-local config, so the fixture stays deterministic.
+func gitEnv(home string) []string {
+	return append(os.Environ(),
+		"HOME="+home,
+		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
+		"GIT_AUTHOR_DATE=2026-01-01T00:00:00Z",
+		"GIT_COMMITTER_DATE=2026-01-01T00:00:00Z",
+		"TZ=UTC",
+	)
 }

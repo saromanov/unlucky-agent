@@ -133,3 +133,30 @@ func TestDockerGuardRejectsHostBind(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 }
+
+func TestPerfectRestoreScript(t *testing.T) {
+	script, err := perfectRestoreScript([]string{"work/src/HUMAN.md", "home/.config/app/config.toml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"/sandbox/work/src/HUMAN.md",
+		"/sandbox/home/.config/app/config.toml",
+		"perfect-work.tar",
+		"perfect-home.tar",
+		"set -e",
+		"find /sandbox/work -mindepth 1 -delete",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("script must contain %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestPerfectRestoreScriptRejectsBadPaths(t *testing.T) {
+	for _, preserve := range [][]string{{"etc/passwd"}, {"work/../etc/passwd"}, {"work/"}} {
+		if _, err := perfectRestoreScript(preserve); err == nil {
+			t.Fatalf("expected an error for %q", preserve)
+		}
+	}
+}
