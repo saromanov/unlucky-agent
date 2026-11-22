@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/saromanov/unlucky-agent/internal/fixture"
 	"github.com/saromanov/unlucky-agent/internal/manifest"
 	"github.com/saromanov/unlucky-agent/internal/oracle"
+	"github.com/saromanov/unlucky-agent/internal/sandbox"
 	"github.com/saromanov/unlucky-agent/internal/scenario"
 )
 
@@ -32,6 +32,9 @@ type Config struct {
 	OutDir     string
 	Keep       bool
 	Timeout    time.Duration
+	// Driver isolates scenario execution. Nil selects the local driver,
+	// which keeps the v0.1 behavior.
+	Driver sandbox.Driver
 }
 
 // Result is the outcome of a single run.
@@ -42,6 +45,7 @@ type Result struct {
 	RestoreCmd     string            `json:"restore_cmd,omitempty"`
 	Verdict        string            `json:"verdict"`
 	Reason         string            `json:"reason,omitempty"`
+	Sandbox        string            `json:"sandbox,omitempty"`
 	DamageDetected bool              `json:"damage_detected"`
 	Recall         float64           `json:"recall"`
 	MetaScore      float64           `json:"meta_score"`
@@ -53,11 +57,12 @@ type Result struct {
 	Artifacts      map[string]string `json:"artifacts,omitempty"`
 }
 
-// Run executes a scenario locally in a temporary directory.
+// Run executes a scenario in a temporary directory.
 //
-// v0.1 does not isolate the process from the host filesystem at the kernel
-// level: damage commands only touch paths inside the temporary directory.
-// Container isolation lands in M1 (see docs/ARCHITECTURE.md).
+// Commands run through a sandbox driver. The default driver is local, which
+// preserves the v0.1 behavior: damage commands only touch paths inside the
+// temporary directory. A container driver adds kernel-level isolation and a
+// pre-flight guard before the first damage step.
 func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if cfg.Scenario == nil {
 		return nil, fmt.Errorf("runner: scenario is not set")
@@ -103,6 +108,24 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		Artifacts:  map[string]string{},
 	}
 
+	drv := cfg.Driver
+	if drv == nil {
+		drv = sandbox.NewLocal()
+	}
+	res.Sandbox = drv.Name()
+	defer func() { _ = drv.Close() }()
+	if err := drv.Prepare(ctx, sandbox.HostDirs{Root: root, Work: work, Home: home}); err != nil {
+		return nil, err
+	}
+
+	// The guard runs before the first damage step: a failed boundary check
+	// must refuse the run.
+	if err := drv.Guard(ctx); err != nil {
+		res.Verdict = VerdictError
+		res.Reason = err.Error()
+		return res, nil
+	}
+
 	capture := func(name string) (string, error) {
 		p := filepath.Join(cfg.OutDir, fmt.Sprintf("%s.%s.jsonl", cfg.Scenario.ID, name))
 		if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
@@ -113,12 +136,21 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		if err != nil {
 			return "", err
 		}
-		if _, err := manifest.Capture([]manifest.Root{
-			{Name: "work", Dir: work},
-			{Name: "home", Dir: home},
-		}, f); err != nil {
+		hostDir, err := os.MkdirTemp(root, "cap-"+name+"-")
+		if err != nil {
 			f.Close()
 			return "", err
+		}
+		roots, undo, err := drv.CaptureRoots(hostDir)
+		if err != nil {
+			f.Close()
+			return "", err
+		}
+		_, capErr := manifest.Capture(roots, f)
+		undo()
+		if capErr != nil {
+			f.Close()
+			return "", capErr
 		}
 		if err := f.Close(); err != nil {
 			return "", err
@@ -135,16 +167,23 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 
+	cpBase, hasCP := drv.(sandbox.CPBaseline)
 	var snap string
 	if cfg.Baseline == "cp-r" {
-		snap = filepath.Join(root, "snapshot")
-		if err := baseline.Snapshot(work, snap); err != nil {
-			return nil, fmt.Errorf("baseline snapshot: %w", err)
+		if hasCP {
+			if err := cpBase.CPSnapshot(ctx, cfg.Timeout); err != nil {
+				return nil, fmt.Errorf("baseline snapshot: %w", err)
+			}
+		} else {
+			snap = filepath.Join(root, "snapshot")
+			if err := baseline.Snapshot(work, snap); err != nil {
+				return nil, fmt.Errorf("baseline snapshot: %w", err)
+			}
 		}
 	}
 
 	start := time.Now()
-	if err := runDamage(ctx, cfg.Scenario, work, home, cfg.Timeout); err != nil {
+	if err := runDamage(ctx, drv, cfg.Scenario, cfg.Timeout); err != nil {
 		res.Verdict = VerdictError
 		res.Reason = err.Error()
 		return res, nil
@@ -178,13 +217,19 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	start = time.Now()
 	switch {
 	case cfg.RestoreCmd != "":
-		if err := shell(ctx, work, home, cfg.RestoreCmd, cfg.Timeout); err != nil {
+		if _, err := drv.Exec(ctx, cfg.RestoreCmd, cfg.Timeout); err != nil {
 			res.Verdict = VerdictError
 			res.Reason = "restore: " + err.Error()
 			return res, nil
 		}
 	case cfg.Baseline == "cp-r":
-		if err := baseline.RestoreExact(snap, work); err != nil {
+		if hasCP {
+			if err := cpBase.CPRestore(ctx, cfg.Timeout); err != nil {
+				res.Verdict = VerdictError
+				res.Reason = "restore baseline: " + err.Error()
+				return res, nil
+			}
+		} else if err := baseline.RestoreExact(snap, work); err != nil {
 			res.Verdict = VerdictError
 			res.Reason = "restore baseline: " + err.Error()
 			return res, nil
@@ -241,7 +286,7 @@ func validBaseline(name string) bool {
 	return false
 }
 
-func runDamage(ctx context.Context, s *scenario.Scenario, work, home string, timeout time.Duration) error {
+func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
 	for i, step := range s.Damage {
 		kind, err := step.Kind()
 		if err != nil {
@@ -253,11 +298,11 @@ func runDamage(ctx context.Context, s *scenario.Scenario, work, home string, tim
 		}
 		switch kind {
 		case scenario.StepShell:
-			if err := shell(ctx, work, home, step.Shell, stepTimeout); err != nil {
+			if _, err := drv.Exec(ctx, step.Shell, stepTimeout); err != nil {
 				return fmt.Errorf("damage[%d]: %w", i, err)
 			}
 		case scenario.StepPostEdit:
-			if err := shell(ctx, work, home, step.PostEdit, stepTimeout); err != nil {
+			if _, err := drv.Exec(ctx, step.PostEdit, stepTimeout); err != nil {
 				return fmt.Errorf("damage[%d] post_edit: %w", i, err)
 			}
 		case scenario.StepToolCall:
@@ -265,7 +310,7 @@ func runDamage(ctx context.Context, s *scenario.Scenario, work, home string, tim
 			if cmd == "" {
 				return fmt.Errorf("damage[%d]: toolcall without args.cmd is not supported yet", i)
 			}
-			if err := shell(ctx, work, home, cmd, stepTimeout); err != nil {
+			if _, err := drv.Exec(ctx, cmd, stepTimeout); err != nil {
 				return fmt.Errorf("damage[%d] toolcall: %w", i, err)
 			}
 		case scenario.StepBarrier:
@@ -282,25 +327,6 @@ func hasPostEdit(s *scenario.Scenario) bool {
 		}
 	}
 	return false
-}
-
-func shell(ctx context.Context, work, home, script string, timeout time.Duration) error {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, "sh", "-c", script)
-	cmd.Dir = work
-	cmd.Env = []string{
-		"HOME=" + home,
-		"PATH=" + os.Getenv("PATH"),
-		"TZ=UTC",
-		"LANG=C.UTF-8",
-		"LC_ALL=C.UTF-8",
-	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, out)
-	}
-	return nil
 }
 
 func verdictReason(diff *oracle.Result) string {

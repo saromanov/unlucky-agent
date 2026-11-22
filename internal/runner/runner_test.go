@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saromanov/unlucky-agent/internal/sandbox"
 	"github.com/saromanov/unlucky-agent/internal/scenario"
 )
 
@@ -21,11 +22,17 @@ func loadScenario(t *testing.T, id string) *scenario.Scenario {
 
 func runScenario(t *testing.T, id, baselineName string) *Result {
 	t.Helper()
+	return runScenarioDriver(t, id, baselineName, nil)
+}
+
+func runScenarioDriver(t *testing.T, id, baselineName string, drv sandbox.Driver) *Result {
+	t.Helper()
 	res, err := Run(context.Background(), Config{
 		Scenario: loadScenario(t, id),
 		Baseline: baselineName,
 		OutDir:   t.TempDir(),
 		Timeout:  30 * time.Second,
+		Driver:   drv,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -87,5 +94,20 @@ func TestUnknownFixture(t *testing.T) {
 		OutDir:   t.TempDir(),
 	}); err == nil {
 		t.Fatal("expected an error for an unknown fixture")
+	}
+}
+
+func TestDriverParityS02(t *testing.T) {
+	def := runScenarioDriver(t, "S02", "cp-r", nil)
+	local := runScenarioDriver(t, "S02", "cp-r", sandbox.NewLocal())
+	if def.Sandbox != "local" || local.Sandbox != "local" {
+		t.Fatalf("both runs must report the local sandbox: %q %q", def.Sandbox, local.Sandbox)
+	}
+	if def.Verdict != VerdictPass || local.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore S02: default=%s local=%s", def.Verdict, local.Verdict)
+	}
+	if def.Verdict != local.Verdict || def.Recall != local.Recall {
+		t.Fatalf("driver changed the verdict: default=%s/%v local=%s/%v",
+			def.Verdict, def.Recall, local.Verdict, local.Recall)
 	}
 }

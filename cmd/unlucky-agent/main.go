@@ -15,6 +15,7 @@ import (
 	"github.com/saromanov/unlucky-agent/internal/oracle"
 	"github.com/saromanov/unlucky-agent/internal/report"
 	"github.com/saromanov/unlucky-agent/internal/runner"
+	"github.com/saromanov/unlucky-agent/internal/sandbox"
 	"github.com/saromanov/unlucky-agent/internal/scenario"
 )
 
@@ -65,6 +66,7 @@ func usage() {
   unlucky-agent manifest -root DIR [-name work] -o out.jsonl
   unlucky-agent diff -base a.jsonl -observed b.jsonl [-exclude glob]... [-require meta]
   unlucky-agent run -scenario scenarios/S02.yaml -baseline cp-r -out out/
+  unlucky-agent run -all -dir scenarios -baseline cp-r -sandbox docker -out out/
   unlucky-agent version
 `)
 }
@@ -190,8 +192,16 @@ func cmdRun(args []string) error {
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-step timeout")
 	all := fs.Bool("all", false, "run every scenario from -dir")
 	dir := fs.String("dir", "scenarios", "scenario directory for -all")
+	sandboxMode := fs.String("sandbox", "local", "sandbox driver: local or docker")
+	image := fs.String("image", sandbox.DefaultImage, "sandbox image (docker driver)")
+	memory := fs.Int("memory", sandbox.DefaultMemoryMB, "sandbox memory limit in MB (docker driver)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	switch *sandboxMode {
+	case "local", "docker":
+	default:
+		return fmt.Errorf("run: unknown sandbox %q", *sandboxMode)
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return err
@@ -216,21 +226,51 @@ func cmdRun(args []string) error {
 	}
 
 	started := time.Now()
+	dockerMode := *sandboxMode == "docker"
+
+	// The canary guards host directories the sandbox must never write to.
+	var can *sandbox.Canary
+	if dockerMode {
+		dirs := []string{os.TempDir(), *outDir}
+		if home, err := os.UserHomeDir(); err == nil {
+			dirs = append(dirs, home)
+		}
+		var err error
+		can, err = sandbox.NewCanary(dirs)
+		if err != nil {
+			return err
+		}
+		defer can.Close()
+		fmt.Printf("canary: %d markers\n", len(can.Paths()))
+	}
+
 	results := make([]runner.Result, 0, len(scenarios))
 	for _, s := range scenarios {
-		res, err := runner.Run(context.Background(), runner.Config{
+		cfg := runner.Config{
 			Scenario:   s,
 			Baseline:   *baselineName,
 			RestoreCmd: *restoreCmd,
 			OutDir:     *outDir,
 			Keep:       *keep,
 			Timeout:    *timeout,
-		})
+		}
+		if dockerMode {
+			drv, err := sandbox.NewDocker(sandbox.DockerConfig{
+				Image:       *image,
+				EvidenceDir: filepath.Join(*outDir, "evidence"),
+				MemoryMB:    *memory,
+			})
+			if err != nil {
+				return err
+			}
+			cfg.Driver = drv
+		}
+		res, err := runner.Run(context.Background(), cfg)
 		if err != nil {
 			return fmt.Errorf("%s: %w", s.ID, err)
 		}
-		fmt.Printf("%s %-4s recall=%.3f meta=%.3f clobbered=%d %s\n",
-			res.ScenarioID, res.Verdict, res.Recall, res.MetaScore, res.Clobbered, res.Reason)
+		fmt.Printf("%s %-4s sandbox=%s recall=%.3f meta=%.3f clobbered=%d %s\n",
+			res.ScenarioID, res.Verdict, res.Sandbox, res.Recall, res.MetaScore, res.Clobbered, res.Reason)
 		results = append(results, *res)
 	}
 
@@ -249,6 +289,13 @@ func cmdRun(args []string) error {
 		return err
 	}
 	fmt.Printf("report: %s, %s\n", jsonPath, mdPath)
+
+	if can != nil {
+		if err := can.Verify(); err != nil {
+			fmt.Fprintln(os.Stderr, "unlucky-agent:", err)
+			return err
+		}
+	}
 
 	for _, r := range results {
 		if r.Verdict == runner.VerdictError {
