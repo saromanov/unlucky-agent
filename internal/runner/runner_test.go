@@ -317,3 +317,23 @@ func TestTarBaselineRejectsDocker(t *testing.T) {
 		t.Fatalf("tar baseline must be rejected for docker, got %v", err)
 	}
 }
+
+// TestS05CpRLeavesHomeUntouched pins the S05 cp-r behavior: the host baseline
+// only snapshots work, so the surviving home/.config directory is matched and
+// its dropped subdirectory is missing. The reduced nlink of the directory
+// itself must not turn into a metadata defect.
+func TestS05CpRLeavesHomeUntouched(t *testing.T) {
+	res := runScenario(t, "S05", "cp-r")
+	if res.Verdict != VerdictFail {
+		t.Fatalf("cp-r cannot restore home, FAIL expected, got %s", res.Verdict)
+	}
+	if res.Recall != 0.2 {
+		t.Fatalf("recall=%v, want 0.2 (home/.config matched of 5 expected)", res.Recall)
+	}
+	if res.MetaScore != 1 {
+		t.Fatalf("meta=%v, want 1: directory nlink is not a metadata defect (%+v)", res.MetaScore, res.Diff.Meta)
+	}
+	if len(res.Diff.Missing) != 4 {
+		t.Fatalf("missing=%+v, want 4 entries", res.Diff.Missing)
+	}
+}

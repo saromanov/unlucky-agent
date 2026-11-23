@@ -164,8 +164,11 @@ func (d *Docker) Prepare(ctx context.Context, host HostDirs) error {
 }
 
 // copyIn streams the src tree into dst inside the container as uid 1000.
+// --sparse keeps fixture holes on the way in, so the container starts from the
+// same sparse layout the host fixture has; GNU tar rebuilds the holes on
+// extraction.
 func (d *Docker) copyIn(ctx context.Context, src, dst string) error {
-	tarCmd := execCommandContext(ctx, "tar", "-C", src, "-cf", "-", ".")
+	tarCmd := execCommandContext(ctx, "tar", "--sparse", "-C", src, "-cf", "-", ".")
 	execCmd := execCommandContext(ctx, d.dockerBin, "exec", "-i", "-u", "1000", d.name, "tar", "-C", dst, "-xf", "-")
 	pipe, err := tarCmd.StdoutPipe()
 	if err != nil {

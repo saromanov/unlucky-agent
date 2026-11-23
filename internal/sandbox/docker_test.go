@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -191,5 +192,60 @@ func TestRunArgsTmpfsSizes(t *testing.T) {
 	}
 	if !strings.Contains(args, containerScratch+":rw,nosuid,size=4608m") {
 		t.Fatalf("scratch tmpfs size must follow the scenario resources:\n%s", args)
+	}
+}
+
+// TestDockerPrepareKeepsSparse verifies that staging a sparse fixture into the
+// container does not densify it: the hole count must survive the tar copy-in.
+func TestDockerPrepareKeepsSparse(t *testing.T) {
+	skipWithoutDocker(t)
+	work := t.TempDir()
+	const size = 8 << 20
+
+	sparse := filepath.Join(work, "sparse.bin")
+	f, err := os.Create(sparse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make([]byte, 4<<10)
+	for i := range block {
+		block[i] = 0x5a
+	}
+	for _, off := range []int64{0, 4 << 20} {
+		if _, err := f.WriteAt(block, off); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := NewDocker(DockerConfig{EvidenceDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	ctx := context.Background()
+	if err := d.Prepare(ctx, HostDirs{Root: t.TempDir(), Work: work, Home: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := d.Exec(ctx, "stat -c %b /sandbox/work/sparse.bin", 30*time.Second)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	blocks, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		t.Fatalf("parse stat output %q: %v", out, err)
+	}
+	if blocks*512 >= size/10 {
+		t.Fatalf("copy-in densified the sparse file: %d blocks", blocks)
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }

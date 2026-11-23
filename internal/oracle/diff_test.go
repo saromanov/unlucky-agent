@@ -229,6 +229,22 @@ func writeManifest(t *testing.T, entries ...manifest.Entry) string {
 	return p
 }
 
+func TestDiffDirNLinkIsNotADefect(t *testing.T) {
+	// A directory nlink follows its subdirectory count: losing a child
+	// directory is a missing defect, not a metadata one.
+	base := manifest.Entry{Root: "work", Path: "work/home/.config", Type: "dir", Mode: 0o755, NLink: 3}
+	obs := base
+	obs.NLink = 2
+
+	res := Diff([]manifest.Entry{base}, []manifest.Entry{obs}, Policy{})
+	if len(res.Meta) != 0 {
+		t.Fatalf("directory nlink must not be a metadata defect: %+v", res.Meta)
+	}
+	if res.Matched != 1 {
+		t.Fatalf("directory with a changed nlink must stay matched, got %d", res.Matched)
+	}
+}
+
 func TestDiffFilesReadsJSONL(t *testing.T) {
 	base := manifest.Entry{Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
 		Size: 4096, Blocks: 8, NLink: 1, Hash: "abc"}

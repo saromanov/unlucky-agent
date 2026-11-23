@@ -73,8 +73,8 @@ all scenarios passed.
   through an agent tool), plus `post_edit` for edits made after the checkpoint.
 - The oracle compares three levels: content, metadata, strict metadata. Only content and
   metadata are hard gates. `post_edit` paths are checked for clobbering.
-- Metadata covers mode (including setuid/setgid), ownership, xattrs, hardlink counts and
-  allocated blocks. Block counts are compared with a 32 KiB tolerance: filesystem allocation
+- Metadata covers mode (including setuid/setgid), ownership, xattrs, hardlink counts of files
+  and allocated blocks. Block counts are compared with a 32 KiB tolerance: filesystem allocation
   noise is ignored, but a densified sparse file produces millions of extra blocks.
 - A scenario passes only when `recall == 1` and `clobbered == 0`.
 

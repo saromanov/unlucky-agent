@@ -111,7 +111,10 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 		if b.Mode != o.Mode || b.UID != o.UID || b.GID != o.GID || !xattrEqual(b.Xattr, o.Xattr) {
 			detail = fmt.Sprintf("mode %04o->%04o uid %d->%d gid %d->%d", b.Mode, o.Mode, b.UID, o.UID, b.GID, o.GID)
 		}
-		if b.NLink != o.NLink {
+		if b.NLink != o.NLink && b.Type != "dir" {
+			// A directory nlink is 2 plus its subdirectory count, so it drops
+			// whenever a child directory is missing. That loss is already a
+			// missing defect; only file nlink carries hardlink information.
 			detail = appendDetail(detail, fmt.Sprintf("nlink %d->%d", b.NLink, o.NLink))
 		}
 		if blocksDrift(b.Blocks, o.Blocks) {
