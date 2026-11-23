@@ -160,3 +160,36 @@ func TestPerfectRestoreScriptRejectsBadPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestRunArgsTmpfsSizes(t *testing.T) {
+	def, err := NewDocker(DockerConfig{EvidenceDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Join(def.runArgs("c"), " ")
+	for _, want := range []string{
+		containerWork + ":rw,nosuid,size=64m",
+		containerHome + ":rw,nosuid,noexec,size=64m",
+		containerScratch + ":rw,nosuid,size=256m",
+	} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("default run args must contain %q:\n%s", want, args)
+		}
+	}
+
+	big, err := NewDocker(DockerConfig{
+		EvidenceDir:   t.TempDir(),
+		WorkSizeMB:    4672,
+		ScratchSizeMB: 4608,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args = strings.Join(big.runArgs("c"), " ")
+	if !strings.Contains(args, containerWork+":rw,nosuid,size=4672m") {
+		t.Fatalf("work tmpfs size must follow the scenario resources:\n%s", args)
+	}
+	if !strings.Contains(args, containerScratch+":rw,nosuid,size=4608m") {
+		t.Fatalf("scratch tmpfs size must follow the scenario resources:\n%s", args)
+	}
+}

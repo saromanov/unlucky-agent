@@ -1,0 +1,31 @@
+id: S09
+title: "Краевые имена путей: пробелы, кавычки, не-ASCII, глубокая цепочка и 50 000 файлов"
+group: semantics
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: path_edges
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "work/edge: имена с пробелом, табом, переводом строки, кавычками, обратным слэшем, ведущим дефисом, NFC/NFD, глубокая цепочка каталогов и 50 000 файлов"
+
+damage:
+  - shell: "rm -rf edge"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/edge/**"]
+  preserve: []
+  exclude: []
+  require: ""
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 512
+  memory_mb: 512

@@ -81,7 +81,14 @@ const markdownTmpl = `# unlucky-agent: run report
 |---|---|---|---|---|---|
 {{range .Results}}| {{.ScenarioID}} | {{.Verdict}} | {{printf "%.3f" .Recall}} | {{printf "%.3f" .MetaScore}} | {{.Clobbered}} | {{.Reason}} |
 {{end}}
-## Summary
+{{if .MetaDefects}}## Metadata defects
+
+Metadata defects are reported separately from content defects: a restore may
+recover every byte and still lose hardlinks, permission bits or sparseness.
+
+{{range .MetaDefects}}- {{.}}
+{{end}}
+{{end}}## Summary
 
 {{.Summary}}
 `
@@ -90,12 +97,27 @@ var mdTemplate = template.Must(template.New("md").Parse(markdownTmpl))
 
 type mdData struct {
 	*Report
-	Summary string
+	Summary     string
+	MetaDefects []string
 }
 
 // WriteMarkdown writes a human-readable report.
 func WriteMarkdown(w io.Writer, r *Report) error {
-	return mdTemplate.Execute(w, mdData{Report: r, Summary: summarize(r)})
+	return mdTemplate.Execute(w, mdData{Report: r, Summary: summarize(r), MetaDefects: metaDefects(r)})
+}
+
+// metaDefects lists every metadata divergence of the run, one line each.
+func metaDefects(r *Report) []string {
+	var out []string
+	for _, res := range r.Results {
+		if res.Diff == nil {
+			continue
+		}
+		for _, c := range res.Diff.Meta {
+			out = append(out, fmt.Sprintf("%s %s: %s", res.ScenarioID, c.Path, c.Detail))
+		}
+	}
+	return out
 }
 
 func summarize(r *Report) string {
