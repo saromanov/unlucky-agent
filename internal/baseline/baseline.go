@@ -6,13 +6,15 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // Names lists the supported baselines.
-func Names() []string { return []string{"none", "cp-r", "perfect"} }
+func Names() []string { return []string{"none", "cp-r", "tar", "perfect"} }
 
 // Snapshot copies the whole tree.
 func Snapshot(src, dst string) error {
@@ -199,6 +201,22 @@ func copyTree(src, dst string, keep keepSet) error {
 				return err
 			}
 			return os.Chtimes(target, info.ModTime(), info.ModTime())
+		case info.Mode()&os.ModeNamedPipe != 0:
+			_ = os.Remove(target)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := syscall.Mkfifo(target, uint32(info.Mode().Perm())); err != nil {
+				return err
+			}
+			return os.Chtimes(target, info.ModTime(), info.ModTime())
+		case info.Mode()&os.ModeSocket != 0:
+			// A socket node is bound, not listened to, so it stays on disk.
+			_ = os.Remove(target)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			return bindSocket(target)
 		default:
 			return fmt.Errorf("baseline: unsupported file type %s", p)
 		}
@@ -234,6 +252,8 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
+	// io.Copy densifies a sparse source. The densification and the duplicated
+	// hardlink inodes are recorded cp-r defects, not bugs to fix here.
 	if _, err := io.Copy(out, in); err != nil {
 		out.Close()
 		return err
@@ -242,4 +262,52 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return os.Chmod(dst, mode)
+}
+
+// bindSocket creates a bound AF_UNIX socket file without listening.
+func bindSocket(path string) error {
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
+		_ = syscall.Close(fd)
+		return fmt.Errorf("baseline: bind %s: %w", path, err)
+	}
+	return syscall.Close(fd)
+}
+
+// TarSnapshot archives the tree with GNU tar. --sparse keeps sparse files
+// sparse, so tar preserves holes that cp-r densifies.
+func TarSnapshot(work, tarPath string) error {
+	cmd := exec.Command("tar", "--sparse", "-C", work, "-cf", tarPath, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tar snapshot: %w: %s", err, out)
+	}
+	return nil
+}
+
+// TarRestoreExact wipes the tree and unpacks the archive, matching
+// RestoreExact semantics. GNU tar keeps hardlinks and sparse holes; it skips
+// sockets with a warning.
+func TarRestoreExact(tarPath, work string) error {
+	if _, err := os.Stat(tarPath); err != nil {
+		return fmt.Errorf("baseline: snapshot: %w", err)
+	}
+	entries, err := os.ReadDir(work)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(work, e.Name())); err != nil {
+			return err
+		}
+	}
+	// -p keeps the archived permission bits, including setuid/setgid: as a
+	// non-root user plain `tar -x` silently drops them.
+	cmd := exec.Command("tar", "-C", work, "-xpf", tarPath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tar restore: %w: %s", err, out)
+	}
+	return nil
 }

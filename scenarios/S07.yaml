@@ -1,0 +1,32 @@
+id: S07
+title: "Спец-файлы: права, setuid/setgid, hardlink, fifo и сокет"
+group: meta
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: special_files
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "work/spec: mode 0400/0755/04755, каталог 02755, hardlink на один inode, битая и циклическая ссылки, fifo и AF_UNIX-сокет"
+
+damage:
+  - shell: "rm -rf spec"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/spec/**"]
+  preserve: []
+  exclude:
+    - "work/spec/sock.unix"
+  require: ""
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

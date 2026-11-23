@@ -18,6 +18,11 @@ const (
 	KindClobbered = "clobbered"
 )
 
+// BlocksTolerance is the allowed st_blocks drift, in 512-byte blocks.
+// It is 32 KiB: enough to ignore filesystem allocation noise, small enough to
+// catch a densified multi-gigabyte sparse file.
+const BlocksTolerance = 64
+
 // Change is a single divergence.
 type Change struct {
 	Path   string `json:"path"`
@@ -102,12 +107,21 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 			})
 			continue
 		}
+		detail := ""
 		if b.Mode != o.Mode || b.UID != o.UID || b.GID != o.GID || !xattrEqual(b.Xattr, o.Xattr) {
-			res.Meta = append(res.Meta, Change{
-				Path:   b.Path,
-				Kind:   KindMeta,
-				Detail: fmt.Sprintf("mode %04o->%04o uid %d->%d gid %d->%d", b.Mode, o.Mode, b.UID, o.UID, b.GID, o.GID),
-			})
+			detail = fmt.Sprintf("mode %04o->%04o uid %d->%d gid %d->%d", b.Mode, o.Mode, b.UID, o.UID, b.GID, o.GID)
+		}
+		if b.NLink != o.NLink && b.Type != "dir" {
+			// A directory nlink is 2 plus its subdirectory count, so it drops
+			// whenever a child directory is missing. That loss is already a
+			// missing defect; only file nlink carries hardlink information.
+			detail = appendDetail(detail, fmt.Sprintf("nlink %d->%d", b.NLink, o.NLink))
+		}
+		if blocksDrift(b.Blocks, o.Blocks) {
+			detail = appendDetail(detail, fmt.Sprintf("blocks %d->%d", b.Blocks, o.Blocks))
+		}
+		if detail != "" {
+			res.Meta = append(res.Meta, Change{Path: b.Path, Kind: KindMeta, Detail: detail})
 			continue
 		}
 		res.Matched++
@@ -211,4 +225,22 @@ func short(h string) string {
 		return h[:8]
 	}
 	return h
+}
+
+// appendDetail joins metadata defect fragments with a single space.
+func appendDetail(detail, part string) string {
+	if detail == "" {
+		return part
+	}
+	return detail + " " + part
+}
+
+// blocksDrift reports whether the allocated block counts diverge beyond the
+// noise tolerance.
+func blocksDrift(base, observed int64) bool {
+	diff := observed - base
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff > BlocksTolerance
 }

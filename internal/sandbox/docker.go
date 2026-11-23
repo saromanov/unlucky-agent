@@ -26,9 +26,11 @@ const (
 
 // Defaults for the docker run parameters.
 const (
-	DefaultImage    = "unlucky-agent-sandbox"
-	DefaultMemoryMB = 512
-	DefaultPids     = 4096
+	DefaultImage         = "unlucky-agent-sandbox"
+	DefaultMemoryMB      = 512
+	DefaultPids          = 4096
+	DefaultWorkSizeMB    = 64
+	DefaultScratchSizeMB = 256
 )
 
 // Docker runs scenario commands inside a hardened container.
@@ -37,6 +39,8 @@ type Docker struct {
 	dockerBin string
 	evidence  string
 	memoryMB  int
+	workSize  int
+	scratchSz int
 	pids      int64
 	extraArgs []string // test seam: deliberately broken mounts
 
@@ -55,6 +59,10 @@ type DockerConfig struct {
 	EvidenceDir string
 	// MemoryMB is the container memory limit.
 	MemoryMB int
+	// WorkSizeMB is the work tmpfs size; it comes from the scenario disk_mb.
+	WorkSizeMB int
+	// ScratchSizeMB is the scratch tmpfs size; snapshot archives live there.
+	ScratchSizeMB int
 	// PidsLimit bounds the process count inside the container.
 	PidsLimit int64
 	// DockerBin overrides the docker executable path.
@@ -71,6 +79,12 @@ func NewDocker(cfg DockerConfig) (*Docker, error) {
 	}
 	if cfg.MemoryMB == 0 {
 		cfg.MemoryMB = DefaultMemoryMB
+	}
+	if cfg.WorkSizeMB == 0 {
+		cfg.WorkSizeMB = DefaultWorkSizeMB
+	}
+	if cfg.ScratchSizeMB == 0 {
+		cfg.ScratchSizeMB = DefaultScratchSizeMB
 	}
 	if cfg.PidsLimit == 0 {
 		cfg.PidsLimit = DefaultPids
@@ -89,6 +103,8 @@ func NewDocker(cfg DockerConfig) (*Docker, error) {
 		dockerBin: cfg.DockerBin,
 		evidence:  cfg.EvidenceDir,
 		memoryMB:  cfg.MemoryMB,
+		workSize:  cfg.WorkSizeMB,
+		scratchSz: cfg.ScratchSizeMB,
 		pids:      cfg.PidsLimit,
 		extraArgs: cfg.ExtraRunArgs,
 	}, nil
@@ -107,9 +123,9 @@ func (d *Docker) runArgs(name string) []string {
 		"--security-opt", "no-new-privileges",
 		"--pids-limit", fmt.Sprint(d.pids),
 		"--memory", fmt.Sprintf("%dm", d.memoryMB),
-		"--tmpfs", containerWork + ":rw,nosuid,size=64m,uid=1000,gid=1000,mode=0755",
-		"--tmpfs", containerHome + ":rw,nosuid,noexec,size=64m,uid=1000,gid=1000,mode=0700",
-		"--tmpfs", containerScratch + ":rw,nosuid,size=256m,uid=1000,gid=1000,mode=0755",
+		"--tmpfs", fmt.Sprintf("%s:rw,nosuid,size=%dm,uid=1000,gid=1000,mode=0755", containerWork, d.workSize),
+		"--tmpfs", fmt.Sprintf("%s:rw,nosuid,noexec,size=64m,uid=1000,gid=1000,mode=0700", containerHome),
+		"--tmpfs", fmt.Sprintf("%s:rw,nosuid,size=%dm,uid=1000,gid=1000,mode=0755", containerScratch, d.scratchSz),
 		"--mount", "type=bind,src=" + d.evidence + ",dst=" + containerEvidence,
 	}
 }
@@ -148,8 +164,11 @@ func (d *Docker) Prepare(ctx context.Context, host HostDirs) error {
 }
 
 // copyIn streams the src tree into dst inside the container as uid 1000.
+// --sparse keeps fixture holes on the way in, so the container starts from the
+// same sparse layout the host fixture has; GNU tar rebuilds the holes on
+// extraction.
 func (d *Docker) copyIn(ctx context.Context, src, dst string) error {
-	tarCmd := execCommandContext(ctx, "tar", "-C", src, "-cf", "-", ".")
+	tarCmd := execCommandContext(ctx, "tar", "--sparse", "-C", src, "-cf", "-", ".")
 	execCmd := execCommandContext(ctx, d.dockerBin, "exec", "-i", "-u", "1000", d.name, "tar", "-C", dst, "-xf", "-")
 	pipe, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -261,8 +280,9 @@ func (d *Docker) CaptureRoots(hostDir string) ([]manifest.Root, func(), error) {
 }
 
 // copyOut streams the src tree from the container into the dst host directory.
+// --sparse keeps holes, so the capture does not report a false blocks defect.
 func (d *Docker) copyOut(src, dst string) error {
-	execCmd := execCommandContext(context.Background(), d.dockerBin, "exec", "-u", "1000", d.name, "tar", "-C", src, "-cf", "-", ".")
+	execCmd := execCommandContext(context.Background(), d.dockerBin, "exec", "-u", "1000", d.name, "tar", "--sparse", "-C", src, "-cf", "-", ".")
 	tarCmd := execCommandContext(context.Background(), "tar", "-C", dst, "-xf", "-")
 	pipe, err := execCmd.StdoutPipe()
 	if err != nil {
@@ -293,7 +313,9 @@ func (d *Docker) copyOut(src, dst string) error {
 // CPSnapshot implements CPBaseline: the cp-r reference rollback runs fully
 // inside the container.
 func (d *Docker) CPSnapshot(ctx context.Context, timeout time.Duration) error {
-	script := "tar -C " + containerWork + " -cf " + containerScratch + "/snapshot.tar ."
+	// --sparse keeps the archive close to the real data size, which matters
+	// because the snapshot lives on the scratch tmpfs.
+	script := "tar --sparse -C " + containerWork + " -cf " + containerScratch + "/snapshot.tar ."
 	if _, err := d.Exec(ctx, script, timeout); err != nil {
 		return fmt.Errorf("docker cp-r snapshot: %w", err)
 	}

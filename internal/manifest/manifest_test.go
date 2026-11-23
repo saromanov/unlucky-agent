@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -93,4 +94,73 @@ func decode(t *testing.T, data []byte) []Entry {
 		out = append(out, e)
 	}
 	return out
+}
+
+func TestCaptureSpecialTypes(t *testing.T) {
+	dir := t.TempDir()
+
+	sparse := filepath.Join(dir, "sparse.bin")
+	f, err := os.Create(sparse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make([]byte, 4<<10)
+	for i := range block {
+		block[i] = 0x33
+	}
+	for _, off := range []int64{0, 512 << 10} {
+		if _, err := f.WriteAt(block, off); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Truncate(1 << 20); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := syscall.Mkfifo(filepath.Join(dir, "fifo.pipe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	sock := filepath.Join(dir, "sock.unix")
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: sock}); err != nil {
+		_ = syscall.Close(fd)
+		t.Fatal(err)
+	}
+	if err := syscall.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	stats, err := Capture([]Root{{Name: "work", Dir: dir}}, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Entries != 3 {
+		t.Fatalf("expected 3 entries, got %d", stats.Entries)
+	}
+
+	byPath := map[string]Entry{}
+	for _, e := range decode(t, buf.Bytes()) {
+		byPath[e.Path] = e
+	}
+	if e := byPath["work/fifo.pipe"]; e.Type != "fifo" {
+		t.Fatalf("fifo captured incorrectly: %+v", e)
+	}
+	if e := byPath["work/sock.unix"]; e.Type != "socket" {
+		t.Fatalf("socket captured incorrectly: %+v", e)
+	}
+	sp := byPath["work/sparse.bin"]
+	if sp.Type != "file" || sp.Size != 1<<20 || sp.Hash == "" {
+		t.Fatalf("sparse file captured incorrectly: %+v", sp)
+	}
+	if sp.Blocks*512 >= 1<<20/10 {
+		t.Fatalf("sparse file must keep its holes: %d blocks", sp.Blocks)
+	}
 }

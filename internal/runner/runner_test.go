@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -215,5 +216,124 @@ func TestOracleMatrixPerfectVsNone(t *testing.T) {
 		if res := runScenario(t, id, "none"); res.Verdict != VerdictFail {
 			t.Fatalf("none must fail %s: verdict=%s reason=%s", id, res.Verdict, res.Reason)
 		}
+	}
+}
+
+func hasMeta(changes []oracle.Change, path, detail string) bool {
+	for _, c := range changes {
+		if c.Path == path && strings.Contains(c.Detail, detail) {
+			return true
+		}
+	}
+	return false
+}
+
+func needGNUTar(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("tar"); err != nil {
+		t.Skip("tar is not installed")
+	}
+	out, err := exec.Command("tar", "--version").Output()
+	if err != nil || !strings.Contains(string(out), "GNU tar") {
+		t.Skip("GNU tar is required")
+	}
+}
+
+func TestS07CpRLosesHardlinkMetadata(t *testing.T) {
+	res := runScenario(t, "S07", "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore S07 content: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if res.MetaScore >= 1 {
+		t.Fatalf("cp-r must lose hardlink metadata, meta=%v", res.MetaScore)
+	}
+	if !hasMeta(res.Diff.Meta, "work/spec/hard_a", "nlink 2->1") {
+		t.Fatalf("expected a nlink defect for hard_a: %+v", res.Diff.Meta)
+	}
+}
+
+func TestS07TarKeepsHardlinkMetadata(t *testing.T) {
+	needGNUTar(t)
+	res := runScenario(t, "S07", "tar")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("tar must restore S07: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if res.MetaScore != 1 {
+		t.Fatalf("tar must keep hardlinks and modes, meta=%v defects=%+v", res.MetaScore, res.Diff.Meta)
+	}
+}
+
+func TestS09CpRPasses(t *testing.T) {
+	res := runScenario(t, "S09", "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore S09: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if res.Recall != 1 || res.MetaScore != 1 {
+		t.Fatalf("recall=%v meta=%v", res.Recall, res.MetaScore)
+	}
+	if !res.DamageDetected {
+		t.Fatal("damage must be detected")
+	}
+}
+
+func TestS09NoneFails(t *testing.T) {
+	res := runScenario(t, "S09", "none")
+	if res.Verdict != VerdictFail {
+		t.Fatalf("without rollback FAIL is expected, got %s", res.Verdict)
+	}
+	if len(res.Diff.Missing) <= 1000 {
+		t.Fatalf("expected a large missing set, got %d", len(res.Diff.Missing))
+	}
+}
+
+func TestS06CpRDensifiesSparse(t *testing.T) {
+	if os.Getenv("UNLUCKY_BIG_TESTS") != "1" {
+		t.Skip("set UNLUCKY_BIG_TESTS=1")
+	}
+	res := runScenario(t, "S06", "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore S06 content: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if res.MetaScore >= 1 {
+		t.Fatalf("cp-r must densify the sparse file, meta=%v", res.MetaScore)
+	}
+	if !hasMeta(res.Diff.Meta, "work/big/sparse.bin", "blocks") {
+		t.Fatalf("expected a blocks defect for sparse.bin: %+v", res.Diff.Meta)
+	}
+}
+
+func TestTarBaselineRejectsDocker(t *testing.T) {
+	drv, err := sandbox.NewDocker(sandbox.DockerConfig{EvidenceDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(context.Background(), Config{
+		Scenario: loadScenario(t, "S02"),
+		Baseline: "tar",
+		OutDir:   t.TempDir(),
+		Driver:   drv,
+	})
+	if err == nil || !strings.Contains(err.Error(), "host-only") {
+		t.Fatalf("tar baseline must be rejected for docker, got %v", err)
+	}
+}
+
+// TestS05CpRLeavesHomeUntouched pins the S05 cp-r behavior: the host baseline
+// only snapshots work, so the surviving home/.config directory is matched and
+// its dropped subdirectory is missing. The reduced nlink of the directory
+// itself must not turn into a metadata defect.
+func TestS05CpRLeavesHomeUntouched(t *testing.T) {
+	res := runScenario(t, "S05", "cp-r")
+	if res.Verdict != VerdictFail {
+		t.Fatalf("cp-r cannot restore home, FAIL expected, got %s", res.Verdict)
+	}
+	if res.Recall != 0.2 {
+		t.Fatalf("recall=%v, want 0.2 (home/.config matched of 5 expected)", res.Recall)
+	}
+	if res.MetaScore != 1 {
+		t.Fatalf("meta=%v, want 1: directory nlink is not a metadata defect (%+v)", res.MetaScore, res.Diff.Meta)
+	}
+	if len(res.Diff.Missing) != 4 {
+		t.Fatalf("missing=%+v, want 4 entries", res.Diff.Missing)
 	}
 }

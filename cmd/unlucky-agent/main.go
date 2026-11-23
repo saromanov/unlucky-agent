@@ -185,7 +185,7 @@ func printChanges(kind string, changes []oracle.Change) {
 func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	scenarioPath := fs.String("scenario", "", "scenario file")
-	baselineName := fs.String("baseline", "none", "baseline: none, cp-r or perfect")
+	baselineName := fs.String("baseline", "none", "baseline: none, cp-r, tar or perfect")
 	outDir := fs.String("out", "out", "output directory")
 	restoreCmd := fs.String("restore", "", "restore command; overrides the baseline")
 	keep := fs.Bool("keep", false, "keep the temporary directory")
@@ -202,6 +202,10 @@ func cmdRun(args []string) error {
 	case "local", "docker":
 	default:
 		return fmt.Errorf("run: unknown sandbox %q", *sandboxMode)
+	}
+	// The tar baseline runs GNU tar against the host staging tree.
+	if *sandboxMode == "docker" && *baselineName == "tar" {
+		return fmt.Errorf("baseline tar is host-only, use local sandbox or cp-r")
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return err
@@ -255,10 +259,14 @@ func cmdRun(args []string) error {
 			Timeout:    *timeout,
 		}
 		if dockerMode {
+			// The tmpfs sizes follow the scenario resources: a fixture must
+			// fit in work, and scratch must hold its snapshot archive.
 			drv, err := sandbox.NewDocker(sandbox.DockerConfig{
-				Image:       *image,
-				EvidenceDir: filepath.Join(*outDir, "evidence"),
-				MemoryMB:    *memory,
+				Image:         *image,
+				EvidenceDir:   filepath.Join(*outDir, "evidence"),
+				MemoryMB:      *memory,
+				WorkSizeMB:    max(sandbox.DefaultWorkSizeMB, s.Resources.DiskMB+64),
+				ScratchSizeMB: max(sandbox.DefaultScratchSizeMB, s.Resources.DiskMB),
 			})
 			if err != nil {
 				return err

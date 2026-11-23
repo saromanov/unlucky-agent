@@ -1,8 +1,11 @@
 package oracle
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/saromanov/unlucky-agent/internal/manifest"
@@ -130,6 +133,130 @@ func TestClobber(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected one clobbered path, got %+v", got)
+	}
+}
+
+func TestDiffBlocksDrift(t *testing.T) {
+	cases := []struct {
+		name     string
+		base     int64
+		observed int64
+		wantMeta bool
+	}{
+		{"densified sparse", 8, 4194304, true},
+		{"within tolerance", 8, 72, false},
+		{"above tolerance", 8, 73, true},
+		{"observed smaller above tolerance", 4194368, 8, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			base := manifest.Entry{Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
+				Size: 4096, Blocks: c.base, NLink: 1, Hash: "abc"}
+			obs := base
+			obs.Blocks = c.observed
+
+			res := Diff([]manifest.Entry{base}, []manifest.Entry{obs}, Policy{})
+			if c.wantMeta {
+				if len(res.Meta) != 1 {
+					t.Fatalf("expected a blocks meta defect, got %+v", res.Meta)
+				}
+				want := fmt.Sprintf("blocks %d->%d", c.base, c.observed)
+				if !strings.Contains(res.Meta[0].Detail, want) {
+					t.Fatalf("detail %q must contain %q", res.Meta[0].Detail, want)
+				}
+				return
+			}
+			if len(res.Meta) != 0 || res.Matched != 1 {
+				t.Fatalf("block drift within tolerance must match: meta=%+v matched=%d", res.Meta, res.Matched)
+			}
+		})
+	}
+}
+
+func TestDiffNLinkDefect(t *testing.T) {
+	base := manifest.Entry{Root: "work", Path: "work/hard_a", Type: "file", Mode: 0o644,
+		Size: 4, Blocks: 8, NLink: 2, Hash: "abc"}
+	obs := base
+	obs.NLink = 1
+
+	res := Diff([]manifest.Entry{base}, []manifest.Entry{obs}, Policy{})
+	if len(res.Changed) != 0 {
+		t.Fatalf("a lost hardlink is a meta defect, not a content one: %+v", res.Changed)
+	}
+	if len(res.Meta) != 1 || !strings.Contains(res.Meta[0].Detail, "nlink 2->1") {
+		t.Fatalf("expected nlink 2->1, got %+v", res.Meta)
+	}
+	if res.MetaScore() >= 1 {
+		t.Fatalf("meta score must drop, got %v", res.MetaScore())
+	}
+}
+
+func TestDiffMetaSeparateFromChanged(t *testing.T) {
+	base := manifest.Entry{Root: "work", Path: "work/hard_a", Type: "file", Mode: 0o644,
+		Size: 4, Blocks: 8, NLink: 2, Hash: "aaaa"}
+	obs := base
+	obs.Hash = "bbbb"
+	obs.NLink = 1
+
+	res := Diff([]manifest.Entry{base}, []manifest.Entry{obs}, Policy{})
+	if len(res.Changed) != 1 || res.Changed[0].Path != "work/hard_a" {
+		t.Fatalf("content change must land in changed: %+v", res.Changed)
+	}
+	if len(res.Meta) != 0 {
+		t.Fatalf("a content defect must not be reported as meta: %+v", res.Meta)
+	}
+}
+
+func writeManifest(t *testing.T, entries ...manifest.Entry) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "m.jsonl")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := json.NewEncoder(f)
+	if err := enc.Encode(manifest.Header{Manifest: 1, Schema: manifest.Schema, Root: "work", Platform: "linux", Hash: manifest.HashAlgorithm}); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if err := enc.Encode(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestDiffDirNLinkIsNotADefect(t *testing.T) {
+	// A directory nlink follows its subdirectory count: losing a child
+	// directory is a missing defect, not a metadata one.
+	base := manifest.Entry{Root: "work", Path: "work/home/.config", Type: "dir", Mode: 0o755, NLink: 3}
+	obs := base
+	obs.NLink = 2
+
+	res := Diff([]manifest.Entry{base}, []manifest.Entry{obs}, Policy{})
+	if len(res.Meta) != 0 {
+		t.Fatalf("directory nlink must not be a metadata defect: %+v", res.Meta)
+	}
+	if res.Matched != 1 {
+		t.Fatalf("directory with a changed nlink must stay matched, got %d", res.Matched)
+	}
+}
+
+func TestDiffFilesReadsJSONL(t *testing.T) {
+	base := manifest.Entry{Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
+		Size: 4096, Blocks: 8, NLink: 1, Hash: "abc"}
+	obs := base
+	obs.Blocks = 4194304
+
+	res, err := DiffFiles(writeManifest(t, base), writeManifest(t, obs), Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Meta) != 1 || res.Meta[0].Path != "work/a.bin" {
+		t.Fatalf("expected a meta defect from JSONL manifests, got %+v", res.Meta)
 	}
 }
 

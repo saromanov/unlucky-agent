@@ -80,6 +80,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if !validBaseline(cfg.Baseline) {
 		return nil, fmt.Errorf("runner: unknown baseline %q", cfg.Baseline)
 	}
+	// The tar baseline runs GNU tar on the host staging tree; the container
+	// driver has its own cp-r implementation.
+	if cfg.Baseline == "tar" && cfg.Driver != nil && cfg.Driver.Name() != "local" {
+		return nil, fmt.Errorf("runner: baseline tar is host-only, use local sandbox or cp-r")
+	}
 
 	root, err := os.MkdirTemp("", "unlucky-"+cfg.Scenario.ID+"-*")
 	if err != nil {
@@ -194,6 +199,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			return nil, fmt.Errorf("baseline snapshot: %w", err)
 		}
 	}
+	tarSnap := filepath.Join(root, "snapshot.tar")
+	if cfg.Baseline == "tar" {
+		if err := baseline.TarSnapshot(work, tarSnap); err != nil {
+			return nil, fmt.Errorf("baseline snapshot: %w", err)
+		}
+	}
 
 	start := time.Now()
 	if err := runDamage(ctx, drv, cfg.Scenario, cfg.Timeout); err != nil {
@@ -279,6 +290,12 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				return res, nil
 			}
 		} else if err := baseline.PerfectRestore(snapWork, snapHome, work, home, preserved); err != nil {
+			res.Verdict = VerdictError
+			res.Reason = "restore baseline: " + err.Error()
+			return res, nil
+		}
+	case cfg.Baseline == "tar":
+		if err := baseline.TarRestoreExact(tarSnap, work); err != nil {
 			res.Verdict = VerdictError
 			res.Reason = "restore baseline: " + err.Error()
 			return res, nil

@@ -1,0 +1,31 @@
+id: S06
+title: "Большие и sparse-файлы: откат обязан сохранять дырки и блоки"
+group: meta
+spec_version: 1
+tiers: [fs-snapshot, staging]
+platforms: [linux]
+fixture: large_files
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "work/big: плотный файл 2 GiB и sparse-файл 2 GiB с двумя островками данных; наивный cp -r раздувает sparse до 2 GiB"
+
+damage:
+  - shell: "rm -rf big"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/big/**"]
+  preserve: []
+  exclude: []
+  require: ""
+
+limits:
+  timeout_s: 600
+
+resources:
+  disk_mb: 4608
+  memory_mb: 512

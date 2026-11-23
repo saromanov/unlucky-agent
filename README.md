@@ -14,9 +14,10 @@ what a tool adds over the obvious answer.
 ## Status
 
 v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, runner with
-`none`, `cp-r` and `perfect` baselines, plus an optional container sandbox with a pre-flight
-guard and a host canary. Scenarios S01 and S03 cover git shadowing of untracked files and
-`git reset --hard`. The adapter protocol is next.
+`none`, `cp-r`, `tar` and `perfect` baselines, plus an optional container sandbox with a pre-flight
+guard and a host canary. Scenarios cover git shadowing of untracked files (S01-S04), files outside
+the project (S05), large and sparse files (S06), special files with hardlinks, setuid, fifos and
+sockets (S07), path-name edge cases (S09) and rollback safety (S21). The adapter protocol is next.
 
 Working name: the repository name may change before the first public release.
 
@@ -26,6 +27,7 @@ Working name: the repository name may change before the first public release.
 make build
 ./bin/unlucky-agent scenarios list
 ./bin/unlucky-agent run -all -dir scenarios -baseline cp-r -out out/cp-r
+./bin/unlucky-agent run -all -dir scenarios -baseline tar -out out/tar
 ./bin/unlucky-agent run -all -dir scenarios -baseline perfect -out out/perfect
 ./bin/unlucky-agent run -all -dir scenarios -baseline none -out out/none
 ```
@@ -51,7 +53,9 @@ make image-sandbox
 ```
 
 The container uses `--network none`, uid 1000, `--cap-drop ALL`, `--security-opt
-no-new-privileges`, memory and pid limits. The work, home and scratch trees are tmpfs; the
+no-new-privileges`, memory and pid limits. The work, home and scratch trees are tmpfs; the work
+and scratch sizes follow `resources.disk_mb` of each scenario (work is `disk_mb + 64`, scratch is
+`disk_mb`, with 64m/256m floors); home stays at 64m. The
 evidence directory (`<out>/evidence`) is the only host bind. Before the first damage step a
 pre-flight guard verifies the uid, `$HOME`, the `/.dockerenv` marker and every mount in
 `/proc/self/mountinfo`; a disk-backed mount outside `/sandbox/evidence` (and the docker
@@ -69,9 +73,15 @@ all scenarios passed.
   through an agent tool), plus `post_edit` for edits made after the checkpoint.
 - The oracle compares three levels: content, metadata, strict metadata. Only content and
   metadata are hard gates. `post_edit` paths are checked for clobbering.
+- Metadata covers mode (including setuid/setgid), ownership, xattrs, hardlink counts of files
+  and allocated blocks. Block counts are compared with a 32 KiB tolerance: filesystem allocation
+  noise is ignored, but a densified sparse file produces millions of extra blocks.
 - A scenario passes only when `recall == 1` and `clobbered == 0`.
 
-Supported baselines: `none` (no rollback), `cp-r` (whole-tree copy) and `perfect`.
+Supported baselines: `none` (no rollback), `cp-r` (whole-tree copy), `tar` (GNU tar with
+`--sparse`) and `perfect`.
+`cp-r` duplicates hardlinks and densifies sparse files; both are recorded as metadata defects.
+`tar` keeps hardlinks and holes, but it is host-only: with `-sandbox docker` use `cp-r` instead.
 `perfect` is the reference rollback used to validate the oracle itself: it snapshots both work
 and home at the checkpoint, restores byte-for-byte, and preserves post-T edits, so it must pass
 every scenario, while `none` must fail every scenario.
@@ -88,7 +98,7 @@ internal/baseline      reference rollback strategies
 internal/runner        scenario execution
 internal/sandbox       local and docker drivers, guard, canary
 internal/report        JSON and Markdown reports
-scenarios              S01, S02, S03, S04, S05, S21
+scenarios              S01-S09, S21
 docker                 sandbox image
 docs                   design documents
 ```
