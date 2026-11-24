@@ -29,7 +29,7 @@ type file struct {
 // Known reports whether the fixture is registered.
 func Known(name string) bool {
 	switch name {
-	case "project_basic", "project_git", "project_git_dirty",
+	case "project_basic", "project_git", "project_git_dirty", "project_git_shadow",
 		"large_files", "special_files", "path_edges":
 		return true
 	}
@@ -82,8 +82,13 @@ func Build(name string, seed int64, work, home string) error {
 		}
 	}
 
-	if name == "project_git" || name == "project_git_dirty" {
+	if name == "project_git" || name == "project_git_dirty" || name == "project_git_shadow" {
 		if err := gitInit(work, home, seed); err != nil {
+			return err
+		}
+	}
+	if name == "project_git_shadow" {
+		if err := buildGitShadow(work, home, files, seed); err != nil {
 			return err
 		}
 	}
@@ -93,6 +98,18 @@ func Build(name string, seed int64, work, home string) error {
 		}
 	}
 	return nil
+}
+
+// buildGitShadow mirrors the project into work/.git-shadow with its own
+// repository, so a shadow-based tool has a second copy to keep consistent.
+func buildGitShadow(work, home string, files []file, seed int64) error {
+	shadow := filepath.Join(work, ".git-shadow")
+	for _, f := range files {
+		if err := write(shadow, f); err != nil {
+			return err
+		}
+	}
+	return gitSeed(shadow, home, fmt.Sprintf("shadow seed=%d", seed))
 }
 
 func write(root string, f file) error {
@@ -111,6 +128,10 @@ func write(root string, f file) error {
 }
 
 func gitInit(work, home string, seed int64) error {
+	return gitSeed(work, home, fmt.Sprintf("fixture seed=%d", seed))
+}
+
+func gitSeed(dir, home, message string) error {
 	gitconfig := filepath.Join(home, ".gitconfig")
 	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Fixture\n\temail = fixture@example.com\n"), 0o600); err != nil {
 		return err
@@ -119,11 +140,11 @@ func gitInit(work, home string, seed int64) error {
 	steps := [][]string{
 		{"init", "-q", "-b", "main"},
 		{"add", "README.md", "src/main.go", "src/util.go", "docs/guide.md", "scripts/run.sh", ".gitignore"},
-		{"commit", "-q", "-m", fmt.Sprintf("fixture seed=%d", seed)},
+		{"commit", "-q", "-m", message},
 	}
 	for _, args := range steps {
 		cmd := exec.Command("git", args...)
-		cmd.Dir = work
+		cmd.Dir = dir
 		cmd.Env = env
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git %v: %w: %s", args, err, out)

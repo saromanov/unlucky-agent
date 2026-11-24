@@ -424,6 +424,51 @@ func TestBarrierStepFailsOnUnknownOp(t *testing.T) {
 	}
 }
 
+func TestScenarioS16CorruptedGit(t *testing.T) {
+	needGit(t)
+	for _, baselineName := range []string{"cp-r", "perfect"} {
+		res := runScenario(t, "S16", baselineName)
+		if res.Verdict != VerdictPass {
+			t.Fatalf("%s must restore both repositories: verdict=%s reason=%s diff=%+v",
+				baselineName, res.Verdict, res.Reason, res.Diff)
+		}
+		if res.Recall != 1 {
+			t.Fatalf("%s: recall=%v", baselineName, res.Recall)
+		}
+	}
+}
+
+func TestScenarioS17DiskPressure(t *testing.T) {
+	res := runScenario(t, "S17", "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore under disk pressure: verdict=%s reason=%s diff=%+v", res.Verdict, res.Reason, res.Diff)
+	}
+	if res.RecoveryPath != "" {
+		t.Fatalf("a passing checkpoint must not carry a recovery path: %q", res.RecoveryPath)
+	}
+
+	none := runScenario(t, "S17", "none")
+	if none.Verdict != VerdictFail {
+		t.Fatalf("without rollback FAIL is expected, got %s", none.Verdict)
+	}
+	if len(none.Diff.Missing) == 0 {
+		t.Fatal("the damaged files must be missing without a rollback")
+	}
+}
+
+func TestPreCheckpointRunsBeforeSnapshot(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf prec"}}, []string{"work/prec/**"})
+	s.Checkpoint.Pre = []scenario.DamageStep{{Shell: "mkdir -p prec && printf x > prec/seed.txt"}}
+
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("the pre step must land in the snapshot: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if none := runInline(t, s, "none"); none.Verdict != VerdictFail {
+		t.Fatalf("without rollback FAIL is expected, got %s", none.Verdict)
+	}
+}
+
 func TestAggregateEqualVerdicts(t *testing.T) {
 	runs := []*Result{{Verdict: VerdictPass}, {Verdict: VerdictPass}, {Verdict: VerdictPass}}
 	res := Aggregate(runs)

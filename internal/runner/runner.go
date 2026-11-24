@@ -33,6 +33,13 @@ const (
 // writerLock is the barrier the concurrent writer must hold.
 const writerLock = "writer.lock"
 
+const (
+	checkpointRecoveryPath = "the checkpoint failed; no restore point exists; " +
+		"recovery path: free disk space and retake the checkpoint before editing"
+	restoreRecoveryPath = "the checkpoint snapshot is intact; " +
+		"the restore can be repeated after freeing disk space"
+)
+
 // Config holds run parameters.
 type Config struct {
 	Scenario   *scenario.Scenario
@@ -54,6 +61,7 @@ type Result struct {
 	RestoreCmd     string            `json:"restore_cmd,omitempty"`
 	Verdict        string            `json:"verdict"`
 	Reason         string            `json:"reason,omitempty"`
+	RecoveryPath   string            `json:"recovery_path,omitempty"`
 	Sandbox        string            `json:"sandbox,omitempty"`
 	DamageDetected bool              `json:"damage_detected"`
 	Recall         float64           `json:"recall"`
@@ -141,6 +149,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return res, nil
 	}
 
+	if err := runPreCheckpoint(ctx, drv, cfg.Scenario, cfg.Timeout); err != nil {
+		res.Verdict = VerdictError
+		res.Reason = "checkpoint pre-steps: " + err.Error()
+		res.RecoveryPath = "no checkpoint was taken: the pre-checkpoint setup failed; " +
+			"recovery path: fix the environment and rerun the scenario"
+		return res, nil
+	}
+
 	capture := func(name string) (string, error) {
 		p := filepath.Join(cfg.OutDir, fmt.Sprintf("%s.%s.jsonl", cfg.Scenario.ID, name))
 		if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
@@ -188,12 +204,18 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if cfg.Baseline == "cp-r" {
 		if hasCP {
 			if err := cpBase.CPSnapshot(ctx, cfg.Timeout); err != nil {
-				return nil, fmt.Errorf("baseline snapshot: %w", err)
+				res.Verdict = VerdictError
+				res.Reason = "checkpoint: " + err.Error()
+				res.RecoveryPath = checkpointRecoveryPath
+				return res, nil
 			}
 		} else {
 			snap = filepath.Join(root, "snapshot")
 			if err := baseline.Snapshot(work, snap); err != nil {
-				return nil, fmt.Errorf("baseline snapshot: %w", err)
+				res.Verdict = VerdictError
+				res.Reason = "checkpoint: " + err.Error()
+				res.RecoveryPath = checkpointRecoveryPath
+				return res, nil
 			}
 		}
 	}
@@ -202,16 +224,25 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if cfg.Baseline == "perfect" {
 		if hasPerfect {
 			if err := perfectBase.PerfectSnapshot(ctx, cfg.Timeout); err != nil {
-				return nil, fmt.Errorf("baseline snapshot: %w", err)
+				res.Verdict = VerdictError
+				res.Reason = "checkpoint: " + err.Error()
+				res.RecoveryPath = checkpointRecoveryPath
+				return res, nil
 			}
 		} else if err := baseline.PerfectSnapshot(work, home, snapWork, snapHome); err != nil {
-			return nil, fmt.Errorf("baseline snapshot: %w", err)
+			res.Verdict = VerdictError
+			res.Reason = "checkpoint: " + err.Error()
+			res.RecoveryPath = checkpointRecoveryPath
+			return res, nil
 		}
 	}
 	tarSnap := filepath.Join(root, "snapshot.tar")
 	if cfg.Baseline == "tar" {
 		if err := baseline.TarSnapshot(work, tarSnap); err != nil {
-			return nil, fmt.Errorf("baseline snapshot: %w", err)
+			res.Verdict = VerdictError
+			res.Reason = "checkpoint: " + err.Error()
+			res.RecoveryPath = checkpointRecoveryPath
+			return res, nil
 		}
 	}
 
@@ -310,6 +341,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		if err := runInterruptRestore(ctx, drv, cfg, root, res); err != nil {
 			res.Verdict = VerdictError
 			res.Reason = err.Error()
+			res.RecoveryPath = restoreRecoveryPath
 			return res, nil
 		}
 		if res.Verdict != "" {
@@ -321,6 +353,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			if _, err := drv.Exec(ctx, cfg.RestoreCmd, cfg.Timeout); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore: " + err.Error()
+				res.RecoveryPath = restoreRecoveryPath
 				return res, nil
 			}
 		case cfg.Baseline == "cp-r":
@@ -328,11 +361,13 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				if err := cpBase.CPRestore(ctx, cfg.Timeout); err != nil {
 					res.Verdict = VerdictError
 					res.Reason = "restore baseline: " + err.Error()
+					res.RecoveryPath = restoreRecoveryPath
 					return res, nil
 				}
 			} else if err := baseline.RestoreExact(snap, work); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore baseline: " + err.Error()
+				res.RecoveryPath = restoreRecoveryPath
 				return res, nil
 			}
 		case cfg.Baseline == "perfect":
@@ -340,17 +375,20 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				if err := perfectBase.PerfectRestore(ctx, cfg.Timeout, preserved); err != nil {
 					res.Verdict = VerdictError
 					res.Reason = "restore baseline: " + err.Error()
+					res.RecoveryPath = restoreRecoveryPath
 					return res, nil
 				}
 			} else if err := baseline.PerfectRestore(snapWork, snapHome, work, home, preserved); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore baseline: " + err.Error()
+				res.RecoveryPath = restoreRecoveryPath
 				return res, nil
 			}
 		case cfg.Baseline == "tar":
 			if err := baseline.TarRestoreExact(tarSnap, work); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore baseline: " + err.Error()
+				res.RecoveryPath = restoreRecoveryPath
 				return res, nil
 			}
 		default:
@@ -410,6 +448,15 @@ func validBaseline(name string) bool {
 		}
 	}
 	return false
+}
+
+func runPreCheckpoint(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
+	for i, step := range s.Checkpoint.Pre {
+		if err := execStep(ctx, drv, step, fmt.Sprintf("checkpoint.pre[%d]", i), stepTimeout(step, timeout)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {

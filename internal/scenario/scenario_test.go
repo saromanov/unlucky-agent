@@ -194,6 +194,37 @@ func TestValidateInterrupt(t *testing.T) {
 	}
 }
 
+func TestValidateCheckpointPre(t *testing.T) {
+	ok := baseScenario(DamageStep{Shell: "rm -rf x"})
+	ok.Checkpoint.Pre = []DamageStep{{Shell: "mkdir -p .fill"}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("a shell pre step must pass: %v", err)
+	}
+
+	for _, step := range []DamageStep{
+		{},
+		{PostEdit: "true"},
+		{Parallel: [][]DamageStep{{{Shell: "true"}}}},
+	} {
+		s := baseScenario(DamageStep{Shell: "rm -rf x"})
+		s.Checkpoint.Pre = []DamageStep{step}
+		err := s.Validate()
+		if err == nil {
+			t.Fatalf("pre step %+v must be rejected", step)
+		}
+		if !strings.Contains(err.Error(), "checkpoint.pre[0]") {
+			t.Fatalf("the error must name the step, got: %v", err)
+		}
+	}
+
+	nonShell := baseScenario(DamageStep{Shell: "rm -rf x"})
+	nonShell.Checkpoint.Pre = []DamageStep{{Shell: "true"}, {PostEdit: "true"}}
+	err := nonShell.Validate()
+	if err == nil || !strings.Contains(err.Error(), "checkpoint.pre[1]: only shell steps are allowed before the checkpoint") {
+		t.Fatalf("a non-shell pre step must be rejected, got: %v", err)
+	}
+}
+
 func TestParseBarrier(t *testing.T) {
 	op, name, err := ParseBarrier("wait-held w.lock")
 	if err != nil || op != BarrierWaitHeld || name != "w.lock" {

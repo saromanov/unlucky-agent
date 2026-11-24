@@ -22,7 +22,7 @@ func needGit(t *testing.T) {
 }
 
 func TestKnown(t *testing.T) {
-	for _, name := range []string{"project_git_dirty", "large_files", "special_files", "path_edges"} {
+	for _, name := range []string{"project_git_dirty", "project_git_shadow", "large_files", "special_files", "path_edges"} {
 		if !Known(name) {
 			t.Fatalf("%s must be a known fixture", name)
 		}
@@ -73,6 +73,23 @@ func TestProjectGitDirty(t *testing.T) {
 	want := "A  src/extra.go\nM  src/main.go\n M src/util.go\n"
 	if string(out) != want {
 		t.Fatalf("git status mismatch:\n got %q\nwant %q", out, want)
+	}
+}
+
+func TestProjectGitShadow(t *testing.T) {
+	needGit(t)
+	work := buildFixture(t, "project_git_shadow")
+	for _, rel := range []string{
+		".git/HEAD",
+		"src/main.go",
+		"docs/guide.md",
+		".git-shadow/.git/HEAD",
+		".git-shadow/src/main.go",
+		".git-shadow/docs/guide.md",
+	} {
+		if _, err := os.Stat(filepath.Join(work, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("%s must exist: %v", rel, err)
+		}
 	}
 }
 
