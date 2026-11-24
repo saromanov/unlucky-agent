@@ -1,0 +1,46 @@
+id: S13
+title: "Две параллельные сессии агента в одном worktree"
+group: failure
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: project_git
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "обе сессии работают одновременно в одном worktree; перекрытие обеспечено barrier-файлами, не sleep"
+
+damage:
+  - timeout_s: 120
+    parallel:
+      - - shell: |
+            mkdir -p .barriers
+            exec 9>.barriers/s13-a.lock
+            flock 9
+            rm -rf src docs
+            printf session-a > SESSION_A
+      - - shell: |
+            mkdir -p .barriers
+            exec 9>.barriers/s13-b.lock
+            flock 9
+            rm -rf scripts
+            printf session-b > SESSION_B
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/src/**", "work/docs/**", "work/scripts/**"]
+  preserve: []
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

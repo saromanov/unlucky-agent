@@ -27,6 +27,9 @@ const (
 // ErrGuardFailed reports that the pre-flight guard refused the run.
 var ErrGuardFailed = errors.New(GuardMarker)
 
+// ErrInterrupted reports that a command was killed by SIGKILL mid-run.
+var ErrInterrupted = errors.New("INTERRUPTED")
+
 // HostDirs are host-side directories prepared by the runner: the fixture
 // staging tree and the run output root.
 type HostDirs struct {
@@ -69,6 +72,12 @@ type Driver interface {
 type CPBaseline interface {
 	CPSnapshot(ctx context.Context, timeout time.Duration) error
 	CPRestore(ctx context.Context, timeout time.Duration) error
+}
+
+// Interruptible is implemented by drivers whose Exec can be interrupted
+// by SIGKILL in the middle of a run.
+type Interruptible interface {
+	ExecInterrupt(ctx context.Context, script string, timeout, killAfter time.Duration) ([]byte, error)
 }
 
 // PerfectBaseline is implemented by drivers that must run the perfect

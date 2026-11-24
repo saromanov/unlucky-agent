@@ -1,10 +1,12 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/manifest"
@@ -38,24 +40,63 @@ func (l *Local) Prepare(_ context.Context, host HostDirs) error {
 // Guard is a no-op: there is no isolation boundary to verify.
 func (l *Local) Guard(_ context.Context) error { return nil }
 
-// Exec runs the script as a host subprocess inside the staging work tree.
-func (l *Local) Exec(ctx context.Context, script string, timeout time.Duration) ([]byte, error) {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := execCommandContext(cctx, "sh", "-c", script)
-	cmd.Dir = l.work
-	cmd.Env = []string{
+func (l *Local) env() []string {
+	return []string{
 		"HOME=" + l.home,
 		"PATH=" + os.Getenv("PATH"),
 		"TZ=UTC",
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
 	}
+}
+
+// Exec runs the script as a host subprocess inside the staging work tree.
+func (l *Local) Exec(ctx context.Context, script string, timeout time.Duration) ([]byte, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := execCommandContext(cctx, "sh", "-c", script)
+	cmd.Dir = l.work
+	cmd.Env = l.env()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("%w: %s", err, out)
 	}
 	return out, nil
+}
+
+// ExecInterrupt runs the script and SIGKILLs its whole process group after
+// killAfter. A script that finishes earlier returns normally.
+func (l *Local) ExecInterrupt(ctx context.Context, script string, timeout, killAfter time.Duration) ([]byte, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := execCommandContext(cctx, "sh", "-c", script)
+	cmd.Dir = l.work
+	cmd.Env = l.env()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	start := time.Now()
+	timer := time.NewTimer(killAfter)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			return out.Bytes(), fmt.Errorf("%w: %s", err, out.Bytes())
+		}
+		return out.Bytes(), nil
+	case <-timer.C:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+		return out.Bytes(), fmt.Errorf("%w: restore interrupted with SIGKILL after %d ms",
+			ErrInterrupted, time.Since(start).Milliseconds())
+	}
 }
 
 // CaptureRoots returns the live trees: no copy is needed on the host.

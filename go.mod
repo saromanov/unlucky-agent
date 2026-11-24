@@ -1,6 +1,6 @@
 module github.com/saromanov/unlucky-agent
 
-go 1.24
+go 1.27
 
 require (
 	golang.org/x/sys v0.34.0

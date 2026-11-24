@@ -66,6 +66,7 @@ func usage() {
   unlucky-agent manifest -root DIR [-name work] -o out.jsonl
   unlucky-agent diff -base a.jsonl -observed b.jsonl [-exclude glob]... [-require meta]
   unlucky-agent run -scenario scenarios/S02.yaml -baseline cp-r -out out/
+  unlucky-agent run -scenario scenarios/S13.yaml -baseline cp-r -repeat 5 -out out/
   unlucky-agent run -all -dir scenarios -baseline cp-r -sandbox docker -out out/
   unlucky-agent version
 `)
@@ -190,6 +191,7 @@ func cmdRun(args []string) error {
 	restoreCmd := fs.String("restore", "", "restore command; overrides the baseline")
 	keep := fs.Bool("keep", false, "keep the temporary directory")
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-step timeout")
+	repeat := fs.Int("repeat", 1, "consecutive runs per scenario; divergent verdicts become FLAKY")
 	all := fs.Bool("all", false, "run every scenario from -dir")
 	dir := fs.String("dir", "scenarios", "scenario directory for -all")
 	sandboxMode := fs.String("sandbox", "local", "sandbox driver: local or docker")
@@ -202,6 +204,9 @@ func cmdRun(args []string) error {
 	case "local", "docker":
 	default:
 		return fmt.Errorf("run: unknown sandbox %q", *sandboxMode)
+	}
+	if *repeat < 1 {
+		return fmt.Errorf("run: -repeat must be >= 1")
 	}
 	// The tar baseline runs GNU tar against the host staging tree.
 	if *sandboxMode == "docker" && *baselineName == "tar" {
@@ -250,33 +255,38 @@ func cmdRun(args []string) error {
 
 	results := make([]runner.Result, 0, len(scenarios))
 	for _, s := range scenarios {
-		cfg := runner.Config{
-			Scenario:   s,
-			Baseline:   *baselineName,
-			RestoreCmd: *restoreCmd,
-			OutDir:     *outDir,
-			Keep:       *keep,
-			Timeout:    *timeout,
-		}
-		if dockerMode {
-			// The tmpfs sizes follow the scenario resources: a fixture must
-			// fit in work, and scratch must hold its snapshot archive.
-			drv, err := sandbox.NewDocker(sandbox.DockerConfig{
-				Image:         *image,
-				EvidenceDir:   filepath.Join(*outDir, "evidence"),
-				MemoryMB:      *memory,
-				WorkSizeMB:    max(sandbox.DefaultWorkSizeMB, s.Resources.DiskMB+64),
-				ScratchSizeMB: max(sandbox.DefaultScratchSizeMB, s.Resources.DiskMB),
-			})
-			if err != nil {
-				return err
+		runs := make([]*runner.Result, 0, *repeat)
+		for range *repeat {
+			cfg := runner.Config{
+				Scenario:   s,
+				Baseline:   *baselineName,
+				RestoreCmd: *restoreCmd,
+				OutDir:     *outDir,
+				Keep:       *keep,
+				Timeout:    *timeout,
 			}
-			cfg.Driver = drv
+			if dockerMode {
+				// The tmpfs sizes follow the scenario resources: a fixture must
+				// fit in work, and scratch must hold its snapshot archive.
+				drv, err := sandbox.NewDocker(sandbox.DockerConfig{
+					Image:         *image,
+					EvidenceDir:   filepath.Join(*outDir, "evidence"),
+					MemoryMB:      *memory,
+					WorkSizeMB:    max(sandbox.DefaultWorkSizeMB, s.Resources.DiskMB+64),
+					ScratchSizeMB: max(sandbox.DefaultScratchSizeMB, s.Resources.DiskMB),
+				})
+				if err != nil {
+					return err
+				}
+				cfg.Driver = drv
+			}
+			res, err := runner.Run(context.Background(), cfg)
+			if err != nil {
+				return fmt.Errorf("%s: %w", s.ID, err)
+			}
+			runs = append(runs, res)
 		}
-		res, err := runner.Run(context.Background(), cfg)
-		if err != nil {
-			return fmt.Errorf("%s: %w", s.ID, err)
-		}
+		res := runner.Aggregate(runs)
 		fmt.Printf("%s %-4s sandbox=%s recall=%.3f meta=%.3f clobbered=%d %s\n",
 			res.ScenarioID, res.Verdict, res.Sandbox, res.Recall, res.MetaScore, res.Clobbered, res.Reason)
 		results = append(results, *res)
