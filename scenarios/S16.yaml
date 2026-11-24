@@ -1,0 +1,56 @@
+id: S16
+title: "Повреждён .git и shadow-репозиторий инструмента"
+group: failure
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: project_git_shadow
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "повреждение затрагивает и рабочий репозиторий, и shadow-репозиторий: мусор в HEAD, усечённые объекты, удалённые refs и pack-каталоги; инструмент обязан восстановить оба репозитория, а не молча потерять чекпойнт"
+
+damage:
+  - shell: |
+      rm -rf src docs scripts
+      printf corrupt > .env
+  - shell: |
+      printf 'ref: refs/heads/broken\n' > .git/HEAD
+      rm -rf .git/refs .git/objects/pack
+      LC_ALL=C find .git/objects -type f | LC_ALL=C sort | head -n 8 | xargs -r chmod u+w
+      LC_ALL=C find .git/objects -type f | LC_ALL=C sort | head -n 8 | xargs -r truncate -s 0
+  - shell: |
+      printf 'ref: refs/heads/broken\n' > .git-shadow/.git/HEAD
+      rm -rf .git-shadow/.git/refs .git-shadow/.git/objects/pack
+      LC_ALL=C find .git-shadow/.git/objects -type f | LC_ALL=C sort | head -n 8 | xargs -r chmod u+w
+      LC_ALL=C find .git-shadow/.git/objects -type f | LC_ALL=C sort | head -n 8 | xargs -r truncate -s 0
+
+restore:
+  mode: newest
+
+expect:
+  restore:
+    - "work/.env"
+    - "work/README.md"
+    - "work/.gitignore"
+    - "work/src/**"
+    - "work/docs/**"
+    - "work/scripts/**"
+    - "work/.git/**"
+    - "work/.git-shadow/**"
+  preserve: []
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+    - "work/.git-shadow/.git/index"
+    - "work/.git-shadow/.git/logs/**"
+    - "work/.git-shadow/.git/*.lock"
+
+limits:
+  timeout_s: 120
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

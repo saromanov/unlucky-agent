@@ -146,8 +146,9 @@ type Scenario struct {
 
 // Checkpoint defines the restore point requirements.
 type Checkpoint struct {
-	When string `yaml:"when"`
-	Note string `yaml:"note"`
+	When string       `yaml:"when"`
+	Note string       `yaml:"note"`
+	Pre  []DamageStep `yaml:"pre"`
 }
 
 // Restore is the rollback mode.
@@ -251,6 +252,16 @@ func (s *Scenario) Validate() error {
 	for i, step := range s.Damage {
 		if err := validateStep(step); err != nil {
 			errs = append(errs, fmt.Sprintf("damage[%d]: %v", i, err))
+		}
+	}
+	for i, step := range s.Checkpoint.Pre {
+		kind, err := step.Kind()
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("checkpoint.pre[%d]: %v", i, err))
+			continue
+		}
+		if kind != StepShell {
+			errs = append(errs, fmt.Sprintf("checkpoint.pre[%d]: only shell steps are allowed before the checkpoint", i))
 		}
 	}
 	if !restoreModes[s.Restore.Mode] {

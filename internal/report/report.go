@@ -88,6 +88,12 @@ recover every byte and still lose hardlinks, permission bits or sparseness.
 
 {{range .MetaDefects}}- {{.}}
 {{end}}
+{{end}}{{if .RecoveryPaths}}## Recovery paths
+
+Every entry states what still can be recovered and how.
+
+{{range .RecoveryPaths}}- {{.}}
+{{end}}
 {{end}}## Summary
 
 {{.Summary}}
@@ -97,13 +103,20 @@ var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{"note":
 
 type mdData struct {
 	*Report
-	Summary     string
-	MetaDefects []string
+	Summary       string
+	MetaDefects   []string
+	RecoveryPaths []string
 }
 
 // WriteMarkdown writes a human-readable report.
 func WriteMarkdown(w io.Writer, r *Report) error {
-	return mdTemplate.Execute(w, mdData{Report: r, Summary: summarize(r), MetaDefects: metaDefects(r)})
+	data := mdData{
+		Report:        r,
+		Summary:       summarize(r),
+		MetaDefects:   metaDefects(r),
+		RecoveryPaths: recoveryPaths(r),
+	}
+	return mdTemplate.Execute(w, data)
 }
 
 // firstSentence shortens a note to its first clause for the matrix cell.
@@ -129,6 +142,18 @@ func metaDefects(r *Report) []string {
 		for _, c := range res.Diff.Meta {
 			out = append(out, fmt.Sprintf("%s %s: %s", res.ScenarioID, c.Path, c.Detail))
 		}
+	}
+	return out
+}
+
+// recoveryPaths lists every failure that still leaves a way back.
+func recoveryPaths(r *Report) []string {
+	var out []string
+	for _, res := range r.Results {
+		if res.RecoveryPath == "" {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s (%s): %s", res.ScenarioID, res.Verdict, res.RecoveryPath))
 	}
 	return out
 }

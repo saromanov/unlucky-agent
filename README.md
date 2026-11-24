@@ -18,7 +18,8 @@ v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, r
 guard and a host canary. Scenarios cover git shadowing of untracked files (S01-S04), files outside
 the project (S05), large and sparse files (S06), special files with hardlinks, setuid, fifos and
 sockets (S07), path-name edge cases (S09), concurrent sessions, torn state, an interrupted
-restore and a restore overlapping a live writer (S13, S14, S15, S18) and rollback safety (S21).
+restore and a restore overlapping a live writer (S13, S14, S15, S18), a corrupted `.git` and
+shadow repository (S16) and a checkpoint under ~95% disk pressure (S17), and rollback safety (S21).
 The adapter protocol is next.
 
 Working name: the repository name may change before the first public release.
@@ -39,7 +40,9 @@ make build
 verdicts pass through, any divergence is reported as `FLAKY`.
 
 Output: `out/<baseline>/report.json` and `out/<baseline>/report.md`. Manifests for every state
-(`base`, `damaged`, `post_edit`, `restored`) are written next to the report.
+(`base`, `damaged`, `post_edit`, `restored`) are written next to the report. Checkpoint, restore
+and manifest-capture failures carry `recovery_path` in JSON and a "Recovery paths" section in
+Markdown.
 
 Run against your own rollback command:
 
@@ -75,6 +78,10 @@ all scenarios passed.
 
 - Scenario (`scenarios/*.yaml`) describes a fixture, a checkpoint point, damage steps and
   expectations.
+- `checkpoint.pre` steps run before the checkpoint is taken (used by S17 to fill the disk to
+  ~95% of the work tmpfs in the docker sandbox; a bounded fill on the local driver). The local
+  run additionally holds the snapshot copy of the fill (~2x121 MB peak); the pressure itself
+  applies to the docker sandbox.
 - Damage steps are either `shell` (mutations that bypass agent hooks) or `toolcall` (mutations
   through an agent tool), plus `post_edit` for edits made after the checkpoint and `barrier`
   steps (`signal`, `wait`, `wait-held`, `wait-free`) for concurrent branches. A `parallel` step
@@ -107,7 +114,7 @@ internal/runner        scenario execution
 internal/sandbox       local and docker drivers, guard, canary
 internal/shim          barrier scripts (files + flock)
 internal/report        JSON and Markdown reports
-scenarios              S01-S09, S13-S15, S18, S21
+scenarios              S01-S09, S13-S18, S21
 docker                 sandbox image
 docs                   design documents
 ```
