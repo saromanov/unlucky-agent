@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -335,5 +336,148 @@ func TestS05CpRLeavesHomeUntouched(t *testing.T) {
 	}
 	if len(res.Diff.Missing) != 4 {
 		t.Fatalf("missing=%+v, want 4 entries", res.Diff.Missing)
+	}
+}
+
+func inlineScenario(damage []scenario.DamageStep, restore []string) *scenario.Scenario {
+	return &scenario.Scenario{
+		ID:          "S90",
+		Title:       "inline",
+		Group:       "failure",
+		SpecVersion: 1,
+		Platforms:   []string{"linux"},
+		Fixture:     "project_basic",
+		Seed:        42,
+		Damage:      damage,
+		Restore:     scenario.Restore{Mode: "newest"},
+		Expect:      scenario.Expect{Restore: restore},
+	}
+}
+
+func runInline(t *testing.T, s *scenario.Scenario, baselineName string) *Result {
+	t.Helper()
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), Config{
+		Scenario: s,
+		Baseline: baselineName,
+		OutDir:   t.TempDir(),
+		Timeout:  60 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+func TestParallelGroupJoinsBeforeCapture(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{
+		TimeoutS: 60,
+		Parallel: [][]scenario.DamageStep{
+			{{Shell: "rm -rf src"}},
+			{{Shell: "rm -rf docs"}},
+		},
+	}}, []string{"work/src/**", "work/docs/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore both branches: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if len(res.Diff.Missing) != 0 || len(res.Diff.Changed) != 0 {
+		t.Fatalf("both branches must be captured after the join: %+v", res.Diff)
+	}
+}
+
+func TestParallelBranchErrorIsReported(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{
+		Parallel: [][]scenario.DamageStep{
+			{{Shell: "rm -rf src"}},
+			{{Shell: "exit 1"}},
+		},
+	}}, []string{"work/src/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictError {
+		t.Fatalf("a failing branch must be an ERROR, got %s", res.Verdict)
+	}
+	if !strings.Contains(res.Reason, "parallel[1]") {
+		t.Fatalf("the branch index must be reported, got %q", res.Reason)
+	}
+}
+
+func TestBarrierSteps(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{
+		{Shell: "rm -rf src"},
+		{Barrier: "signal s90-ready"},
+		{Barrier: "wait s90-ready"},
+		{Barrier: "wait-free s90-free"},
+	}, []string{"work/src/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("barrier steps must pass: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+}
+
+func TestBarrierStepFailsOnUnknownOp(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Barrier: "hold s90"}}, []string{"work/src/**"})
+	if err := s.Validate(); err == nil {
+		t.Fatal("an unknown barrier op must be rejected by validation")
+	}
+}
+
+func TestAggregateEqualVerdicts(t *testing.T) {
+	runs := []*Result{{Verdict: VerdictPass}, {Verdict: VerdictPass}, {Verdict: VerdictPass}}
+	res := Aggregate(runs)
+	if res.Verdict != VerdictPass || res.Reason != "" {
+		t.Fatalf("identical verdicts must pass through: %s %q", res.Verdict, res.Reason)
+	}
+	if Aggregate(nil) != nil {
+		t.Fatal("an empty run list must aggregate to nil")
+	}
+	single := &Result{Verdict: VerdictFail}
+	if Aggregate([]*Result{single}) != single {
+		t.Fatal("a single run must be returned as is")
+	}
+}
+
+func TestAggregateDivergenceIsFlaky(t *testing.T) {
+	runs := []*Result{
+		{Verdict: VerdictPass},
+		{Verdict: VerdictFail},
+		{Verdict: VerdictPass},
+	}
+	res := Aggregate(runs)
+	if res.Verdict != VerdictFlaky {
+		t.Fatalf("divergent verdicts must be FLAKY, got %s", res.Verdict)
+	}
+	if !strings.Contains(res.Reason, "PASS, FAIL, PASS") {
+		t.Fatalf("the reason must list the verdicts in run order, got %q", res.Reason)
+	}
+}
+
+func TestExecInterrupt(t *testing.T) {
+	dir := t.TempDir()
+	drv := sandbox.NewLocal()
+	if err := drv.Prepare(context.Background(), sandbox.HostDirs{Root: dir, Work: dir, Home: dir}); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	out, err := drv.ExecInterrupt(context.Background(), "sleep 5; echo late", 30*time.Second, 100*time.Millisecond)
+	if !errors.Is(err, sandbox.ErrInterrupted) {
+		t.Fatalf("the script must be killed mid-run, got %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("the process group must be killed, took %s", time.Since(start))
+	}
+	if strings.Contains(string(out), "late") {
+		t.Fatalf("the script must not complete: %q", out)
+	}
+
+	out, err = drv.ExecInterrupt(context.Background(), "echo done", 30*time.Second, 5*time.Second)
+	if err != nil {
+		t.Fatalf("a script that finishes first must not be interrupted: %v", err)
+	}
+	if !strings.Contains(string(out), "done") {
+		t.Fatalf("output is lost: %q", out)
 	}
 }

@@ -1,0 +1,47 @@
+id: S14
+title: "Рваное состояние: файл дописывается во время снятия чекпоинт-копии"
+group: failure
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: project_basic
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "второй сеанс снимает чекпоинт-копию, пока первый дописывает файл — состояние рваное; откат обязан вернуть agent.bin к содержимому на момент чекпоинта"
+
+damage:
+  - timeout_s: 240
+    parallel:
+      - - shell: |
+            rm -rf docs
+            mkdir -p workdata .barriers
+            printf 'base\n' > workdata/agent.bin
+            exec 9>.barriers/s14-write.lock
+            flock 9
+            i=0
+            while [ $i -lt 96 ]; do
+              dd if=/dev/zero of=workdata/agent.bin bs=64k count=8 oflag=append conv=notrunc status=none
+              i=$((i+1))
+            done
+      - - barrier: "wait-held s14-write.lock"
+        - shell: "cp workdata/agent.bin workdata/checkpoint-copy.bin"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/docs/**", "work/workdata/**"]
+  preserve: []
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 240
+
+resources:
+  disk_mb: 512
+  memory_mb: 512

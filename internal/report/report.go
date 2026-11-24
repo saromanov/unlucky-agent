@@ -77,9 +77,9 @@ const markdownTmpl = `# unlucky-agent: run report
 
 ## Matrix
 
-| Scenario | Verdict | Recall | Meta | Clobbered | Reason |
-|---|---|---|---|---|---|
-{{range .Results}}| {{.ScenarioID}} | {{.Verdict}} | {{printf "%.3f" .Recall}} | {{printf "%.3f" .MetaScore}} | {{.Clobbered}} | {{.Reason}} |
+| Scenario | Verdict | Recall | Meta | Clobbered | Reason | Notes |
+|---|---|---|---|---|---|---|
+{{range .Results}}| {{.ScenarioID}} | {{.Verdict}} | {{printf "%.3f" .Recall}} | {{printf "%.3f" .MetaScore}} | {{.Clobbered}} | {{.Reason}} | {{note .Notes}} |
 {{end}}
 {{if .MetaDefects}}## Metadata defects
 
@@ -93,7 +93,7 @@ recover every byte and still lose hardlinks, permission bits or sparseness.
 {{.Summary}}
 `
 
-var mdTemplate = template.Must(template.New("md").Parse(markdownTmpl))
+var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{"note": firstSentence}).Parse(markdownTmpl))
 
 type mdData struct {
 	*Report
@@ -104,6 +104,19 @@ type mdData struct {
 // WriteMarkdown writes a human-readable report.
 func WriteMarkdown(w io.Writer, r *Report) error {
 	return mdTemplate.Execute(w, mdData{Report: r, Summary: summarize(r), MetaDefects: metaDefects(r)})
+}
+
+// firstSentence shortens a note to its first clause for the matrix cell.
+func firstSentence(note string) string {
+	note = strings.TrimSpace(note)
+	if i := strings.Index(note, ";"); i >= 0 {
+		note = strings.TrimSpace(note[:i])
+	}
+	const limit = 120
+	if r := []rune(note); len(r) > limit {
+		note = string(r[:limit-3]) + "..."
+	}
+	return note
 }
 
 // metaDefects lists every metadata divergence of the run, one line each.

@@ -1,0 +1,48 @@
+id: S18
+title: "Откат во время записи агента: живые файлы обязаны пережить восстановление"
+group: safety
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: project_basic
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "агент продолжает писать в live/ во время отката; чанки, существовавшие до старта отката, обязаны пережить его (сохранение), иначе инструмент clobber'ит живую работу агента"
+
+damage:
+  - shell: "rm -rf src docs"
+
+restore:
+  mode: newest
+  concurrent_write: |
+    mkdir -p live .barriers
+    exec 9>.barriers/writer.lock
+    flock 9
+    i=0
+    while [ $i -lt 8 ]; do
+      printf 'chunk %04d\n' $i > "live/chunk-$(printf %04d $i)"
+      i=$((i+1))
+    done
+    : > .barriers/writer-ready
+    while [ ! -e .barriers/writer-stop ]; do
+      printf 'chunk %04d\n' $i > "live/chunk-$(printf %04d $i)"
+      i=$((i+1))
+      sleep 0.05
+    done
+
+expect:
+  restore: ["work/src/**", "work/docs/**"]
+  preserve: ["work/live/**"]
+  exclude:
+    - "work/.git/index"
+    - "work/.git/logs/**"
+    - "work/.git/*.lock"
+
+limits:
+  timeout_s: 300
+
+resources:
+  disk_mb: 64
+  memory_mb: 512

@@ -1,0 +1,33 @@
+id: S15
+title: "kill -9 посреди отката, затем повторный откат"
+group: failure
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: path_edges
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "восстановление выполняется дважды; первое прерывается SIGKILL (kill -9) после 300 мс, затем восстановление повторяется; вердикт PASS означает, что инструмент идемпотентен — повторный запуск достраивает состояние после прерванного"
+
+damage:
+  - shell: "rm -rf edge"
+
+restore:
+  mode: newest
+  interrupt:
+    kill_after_ms: 300
+
+expect:
+  restore: ["work/edge/**"]
+  preserve: []
+  exclude: []
+  require: ""
+
+limits:
+  timeout_s: 600
+
+resources:
+  disk_mb: 512
+  memory_mb: 512

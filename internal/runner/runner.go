@@ -3,10 +3,13 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/baseline"
@@ -15,6 +18,7 @@ import (
 	"github.com/saromanov/unlucky-agent/internal/oracle"
 	"github.com/saromanov/unlucky-agent/internal/sandbox"
 	"github.com/saromanov/unlucky-agent/internal/scenario"
+	"github.com/saromanov/unlucky-agent/internal/shim"
 )
 
 // Verdicts.
@@ -23,7 +27,11 @@ const (
 	VerdictFail    = "FAIL"
 	VerdictError   = "ERROR"
 	VerdictSkipped = "SKIPPED_UNSUPPORTED"
+	VerdictFlaky   = "FLAKY"
 )
+
+// writerLock is the barrier the concurrent writer must hold.
+const writerLock = "writer.lock"
 
 // Config holds run parameters.
 type Config struct {
@@ -56,6 +64,7 @@ type Result struct {
 	RestoreMS      int64             `json:"restore_ms"`
 	Root           string            `json:"root,omitempty"`
 	Artifacts      map[string]string `json:"artifacts,omitempty"`
+	Notes          string            `json:"notes,omitempty"`
 }
 
 // Run executes a scenario in a temporary directory.
@@ -241,16 +250,50 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	pol := oracle.Policy{
 		Exclude:     cfg.Scenario.Expect.Exclude,
 		Preserve:    cfg.Scenario.Expect.Preserve,
-		AllowAdded:  []string{".git/objects/**", ".git/index", ".git/logs/**", ".git/lost-found/**"},
+		AllowAdded:  []string{shim.Dir() + "/**", ".git/objects/**", ".git/index", ".git/logs/**", ".git/lost-found/**"},
 		Expected:    cfg.Scenario.Expect.Restore,
 		RequireMeta: cfg.Scenario.Expect.Require == "meta",
+	}
+
+	writerDone := make(chan error, 1)
+	writerCtx, cancelWriter := context.WithCancel(ctx)
+	defer cancelWriter()
+	var preRestoreManifest string
+	if cfg.Scenario.Restore.ConcurrentWrite != "" {
+		script := cfg.Scenario.Restore.ConcurrentWrite
+		go func() {
+			_, err := drv.Exec(writerCtx, script, cfg.Timeout)
+			writerDone <- err
+		}()
+		waitHeld := shim.WaitHeldScript(writerLock, cfg.Timeout)
+		if _, err := drv.Exec(ctx, waitHeld, cfg.Timeout); err != nil {
+			res.Verdict = VerdictError
+			res.Reason = "concurrent writer did not start: " + err.Error()
+			return res, nil
+		}
+		p, err := capture("pre_restore")
+		if err != nil {
+			return nil, err
+		}
+		preRestoreManifest = p
+	}
+
+	// The concurrent writer defines the live state: its paths must survive the
+	// rollback. A post-edit step takes precedence for preserve resolution.
+	preserveSource := postEditManifest
+	clobberSource := postEditManifest
+	if preRestoreManifest != "" {
+		if preserveSource == "" {
+			preserveSource = preRestoreManifest
+		}
+		clobberSource = preRestoreManifest
 	}
 
 	// The perfect baseline must keep the concrete post-T edits, so their
 	// manifest paths are resolved before the restore step.
 	var preserved []string
-	if postEditManifest != "" {
-		entries, err := oracle.LoadEntries(postEditManifest)
+	if preserveSource != "" {
+		entries, err := oracle.LoadEntries(preserveSource)
 		if err != nil {
 			return nil, err
 		}
@@ -262,48 +305,72 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		sort.Strings(preserved)
 	}
 
-	start = time.Now()
-	switch {
-	case cfg.RestoreCmd != "":
-		if _, err := drv.Exec(ctx, cfg.RestoreCmd, cfg.Timeout); err != nil {
+	restoreStart := time.Now()
+	if cfg.Scenario.Restore.Interrupt != nil {
+		if err := runInterruptRestore(ctx, drv, cfg, root, res); err != nil {
 			res.Verdict = VerdictError
-			res.Reason = "restore: " + err.Error()
+			res.Reason = err.Error()
 			return res, nil
 		}
-	case cfg.Baseline == "cp-r":
-		if hasCP {
-			if err := cpBase.CPRestore(ctx, cfg.Timeout); err != nil {
+		if res.Verdict != "" {
+			return res, nil
+		}
+	} else {
+		switch {
+		case cfg.RestoreCmd != "":
+			if _, err := drv.Exec(ctx, cfg.RestoreCmd, cfg.Timeout); err != nil {
+				res.Verdict = VerdictError
+				res.Reason = "restore: " + err.Error()
+				return res, nil
+			}
+		case cfg.Baseline == "cp-r":
+			if hasCP {
+				if err := cpBase.CPRestore(ctx, cfg.Timeout); err != nil {
+					res.Verdict = VerdictError
+					res.Reason = "restore baseline: " + err.Error()
+					return res, nil
+				}
+			} else if err := baseline.RestoreExact(snap, work); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore baseline: " + err.Error()
 				return res, nil
 			}
-		} else if err := baseline.RestoreExact(snap, work); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "restore baseline: " + err.Error()
-			return res, nil
-		}
-	case cfg.Baseline == "perfect":
-		if hasPerfect {
-			if err := perfectBase.PerfectRestore(ctx, cfg.Timeout, preserved); err != nil {
+		case cfg.Baseline == "perfect":
+			if hasPerfect {
+				if err := perfectBase.PerfectRestore(ctx, cfg.Timeout, preserved); err != nil {
+					res.Verdict = VerdictError
+					res.Reason = "restore baseline: " + err.Error()
+					return res, nil
+				}
+			} else if err := baseline.PerfectRestore(snapWork, snapHome, work, home, preserved); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore baseline: " + err.Error()
 				return res, nil
 			}
-		} else if err := baseline.PerfectRestore(snapWork, snapHome, work, home, preserved); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "restore baseline: " + err.Error()
-			return res, nil
+		case cfg.Baseline == "tar":
+			if err := baseline.TarRestoreExact(tarSnap, work); err != nil {
+				res.Verdict = VerdictError
+				res.Reason = "restore baseline: " + err.Error()
+				return res, nil
+			}
+		default:
+			// baseline none: no rollback is performed.
 		}
-	case cfg.Baseline == "tar":
-		if err := baseline.TarRestoreExact(tarSnap, work); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "restore baseline: " + err.Error()
-			return res, nil
-		}
-	default:
-		// baseline none: no rollback is performed.
+		res.RestoreMS = time.Since(restoreStart).Milliseconds()
 	}
-	res.RestoreMS = time.Since(start).Milliseconds()
+
+	if cfg.Scenario.Restore.ConcurrentWrite != "" {
+		if _, err := drv.Exec(ctx, shim.SignalScript("writer-stop"), cfg.Timeout); err != nil {
+			res.Verdict = VerdictError
+			res.Reason = "concurrent writer stop: " + err.Error()
+			return res, nil
+		}
+		if err := <-writerDone; err != nil {
+			res.Verdict = VerdictError
+			res.Reason = "concurrent writer: " + err.Error()
+			return res, nil
+		}
+	}
 
 	restoredManifest, err := capture("restored")
 	if err != nil {
@@ -318,8 +385,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	res.Recall = diff.Recall()
 	res.MetaScore = diff.MetaScore()
 
-	if postEditManifest != "" {
-		clobbered, err := oracle.Clobber(postEditManifest, restoredManifest, pol)
+	if clobberSource != "" {
+		clobbered, err := oracle.Clobber(clobberSource, restoredManifest, pol)
 		if err != nil {
 			return nil, err
 		}
@@ -351,32 +418,187 @@ func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, ti
 		if err != nil {
 			return err
 		}
-		stepTimeout := timeout
-		if step.TimeoutS > 0 {
-			stepTimeout = time.Duration(step.TimeoutS) * time.Second
+		prefix := fmt.Sprintf("damage[%d]", i)
+		if kind == scenario.StepParallel {
+			if err := runParallel(ctx, drv, i, step, timeout); err != nil {
+				return err
+			}
+			continue
 		}
-		switch kind {
-		case scenario.StepShell:
-			if _, err := drv.Exec(ctx, step.Shell, stepTimeout); err != nil {
-				return fmt.Errorf("damage[%d]: %w", i, err)
-			}
-		case scenario.StepPostEdit:
-			if _, err := drv.Exec(ctx, step.PostEdit, stepTimeout); err != nil {
-				return fmt.Errorf("damage[%d] post_edit: %w", i, err)
-			}
-		case scenario.StepToolCall:
-			cmd := step.ToolCall.Args["cmd"]
-			if cmd == "" {
-				return fmt.Errorf("damage[%d]: toolcall without args.cmd is not supported yet", i)
-			}
-			if _, err := drv.Exec(ctx, cmd, stepTimeout); err != nil {
-				return fmt.Errorf("damage[%d] toolcall: %w", i, err)
-			}
-		case scenario.StepBarrier:
-			return fmt.Errorf("damage[%d]: barrier requires a two-process sandbox and is unavailable in v0.1", i)
+		if err := execStep(ctx, drv, step, prefix, stepTimeout(step, timeout)); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// runParallel executes the branches of a parallel group concurrently.
+func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario.DamageStep, timeout time.Duration) error {
+	gctx, cancel := context.WithTimeout(ctx, stepTimeout(step, timeout))
+	defer cancel()
+
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		werr error
+	)
+	for b, branch := range step.Parallel {
+		wg.Add(1)
+		go func(b int, branch []scenario.DamageStep) {
+			defer wg.Done()
+			prefix := fmt.Sprintf("damage[%d] parallel[%d]", idx, b)
+			for _, nested := range branch {
+				if err := execStep(gctx, drv, nested, prefix, stepTimeout(nested, stepTimeout(step, timeout))); err != nil {
+					mu.Lock()
+					if werr == nil {
+						werr = err
+					}
+					mu.Unlock()
+					cancel()
+					return
+				}
+			}
+		}(b, branch)
+	}
+	wg.Wait()
+	return werr
+}
+
+// execStep runs one damage step and prefixes its errors with the journal label.
+func execStep(ctx context.Context, drv sandbox.Driver, step scenario.DamageStep, prefix string, timeout time.Duration) error {
+	kind, err := step.Kind()
+	if err != nil {
+		return fmt.Errorf("%s: %w", prefix, err)
+	}
+	switch kind {
+	case scenario.StepShell:
+		if _, err := drv.Exec(ctx, step.Shell, timeout); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
+	case scenario.StepPostEdit:
+		if _, err := drv.Exec(ctx, step.PostEdit, timeout); err != nil {
+			return fmt.Errorf("%s post_edit: %w", prefix, err)
+		}
+	case scenario.StepToolCall:
+		cmd := step.ToolCall.Args["cmd"]
+		if cmd == "" {
+			return fmt.Errorf("%s: toolcall without args.cmd is not supported yet", prefix)
+		}
+		if _, err := drv.Exec(ctx, cmd, timeout); err != nil {
+			return fmt.Errorf("%s toolcall: %w", prefix, err)
+		}
+	case scenario.StepBarrier:
+		script, err := barrierScript(step.Barrier, timeout)
+		if err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
+		}
+		if _, err := drv.Exec(ctx, script, timeout); err != nil {
+			return fmt.Errorf("%s barrier: %w", prefix, err)
+		}
+	case scenario.StepParallel:
+		return fmt.Errorf("%s: nested parallel group", prefix)
+	}
+	return nil
+}
+
+func stepTimeout(step scenario.DamageStep, fallback time.Duration) time.Duration {
+	if step.TimeoutS > 0 {
+		return time.Duration(step.TimeoutS) * time.Second
+	}
+	return fallback
+}
+
+// barrierScript maps a barrier step onto the shim script executed by the driver.
+func barrierScript(spec string, timeout time.Duration) (string, error) {
+	op, name, err := scenario.ParseBarrier(spec)
+	if err != nil {
+		return "", err
+	}
+	switch op {
+	case scenario.BarrierSignal:
+		return shim.SignalScript(name), nil
+	case scenario.BarrierWait:
+		return shim.WaitScript(name, timeout), nil
+	case scenario.BarrierWaitHeld:
+		return shim.WaitHeldScript(name, timeout), nil
+	case scenario.BarrierWaitFree:
+		return shim.WaitFreeScript(name, timeout), nil
+	default:
+		return "", fmt.Errorf("unknown barrier op %q", op)
+	}
+}
+
+// runInterruptRestore kills the first restore pass with SIGKILL and repeats it:
+// the verdict records whether a repeated restore is idempotent.
+func runInterruptRestore(ctx context.Context, drv sandbox.Driver, cfg Config, root string, res *Result) error {
+	spec := cfg.Scenario.Restore.Interrupt
+	script := cfg.RestoreCmd
+	if script == "" {
+		if cfg.Baseline != "tar" || drv.Name() != "local" {
+			res.Verdict = VerdictSkipped
+			res.Reason = "interrupted restore requires the tar baseline and the local sandbox"
+			return nil
+		}
+		script = "find . -mindepth 1 -maxdepth 1 ! -name " + shim.Dir() + " -exec rm -rf -- {} + && tar -xpf " +
+			shellQuote(filepath.Join(root, "snapshot.tar"))
+	}
+	intr, ok := drv.(sandbox.Interruptible)
+	if !ok {
+		res.Verdict = VerdictSkipped
+		res.Reason = fmt.Sprintf("sandbox %s does not support interruptible exec", drv.Name())
+		return nil
+	}
+
+	start := time.Now()
+	_, err := intr.ExecInterrupt(ctx, script, cfg.Timeout, time.Duration(spec.KillAfterMS)*time.Millisecond)
+	first := time.Since(start).Milliseconds()
+	if err != nil && !errors.Is(err, sandbox.ErrInterrupted) {
+		return fmt.Errorf("restore: %w", err)
+	}
+	if err != nil {
+		res.Notes = err.Error()
+	} else {
+		res.Notes = "restore finished before the kill signal"
+	}
+	res.Notes += "; the verdict records whether the tool tolerates a repeated restore after SIGKILL"
+
+	start = time.Now()
+	if _, err := drv.Exec(ctx, script, cfg.Timeout); err != nil {
+		return fmt.Errorf("restore: second pass: %w", err)
+	}
+	res.RestoreMS = first + time.Since(start).Milliseconds()
+	return nil
+}
+
+// shellQuote single-quotes a path for a POSIX shell.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// Aggregate collapses repeat runs of one scenario into a single result:
+// identical verdicts pass through; divergent verdicts become FLAKY.
+func Aggregate(results []*Result) *Result {
+	if len(results) == 0 {
+		return nil
+	}
+	if len(results) == 1 {
+		return results[0]
+	}
+	base := *results[0]
+	verdicts := make([]string, 0, len(results))
+	diverged := false
+	for i, r := range results {
+		verdicts = append(verdicts, r.Verdict)
+		if i > 0 && r.Verdict != results[0].Verdict {
+			diverged = true
+		}
+	}
+	if diverged {
+		base.Verdict = VerdictFlaky
+		base.Reason = fmt.Sprintf("verdicts diverged over %d runs: %s",
+			len(verdicts), strings.Join(verdicts, ", "))
+	}
+	return &base
 }
 
 func hasPostEdit(s *scenario.Scenario) bool {

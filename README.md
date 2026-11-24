@@ -17,7 +17,9 @@ v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, r
 `none`, `cp-r`, `tar` and `perfect` baselines, plus an optional container sandbox with a pre-flight
 guard and a host canary. Scenarios cover git shadowing of untracked files (S01-S04), files outside
 the project (S05), large and sparse files (S06), special files with hardlinks, setuid, fifos and
-sockets (S07), path-name edge cases (S09) and rollback safety (S21). The adapter protocol is next.
+sockets (S07), path-name edge cases (S09), concurrent sessions, torn state, an interrupted
+restore and a restore overlapping a live writer (S13, S14, S15, S18) and rollback safety (S21).
+The adapter protocol is next.
 
 Working name: the repository name may change before the first public release.
 
@@ -30,7 +32,11 @@ make build
 ./bin/unlucky-agent run -all -dir scenarios -baseline tar -out out/tar
 ./bin/unlucky-agent run -all -dir scenarios -baseline perfect -out out/perfect
 ./bin/unlucky-agent run -all -dir scenarios -baseline none -out out/none
+./bin/unlucky-agent run -scenario scenarios/S13.yaml -baseline cp-r -repeat 5 -out out/s13
 ```
+
+`-repeat N` runs each scenario N times with a fresh runner and aggregates the verdicts: identical
+verdicts pass through, any divergence is reported as `FLAKY`.
 
 Output: `out/<baseline>/report.json` and `out/<baseline>/report.md`. Manifests for every state
 (`base`, `damaged`, `post_edit`, `restored`) are written next to the report.
@@ -70,7 +76,9 @@ all scenarios passed.
 - Scenario (`scenarios/*.yaml`) describes a fixture, a checkpoint point, damage steps and
   expectations.
 - Damage steps are either `shell` (mutations that bypass agent hooks) or `toolcall` (mutations
-  through an agent tool), plus `post_edit` for edits made after the checkpoint.
+  through an agent tool), plus `post_edit` for edits made after the checkpoint and `barrier`
+  steps (`signal`, `wait`, `wait-held`, `wait-free`) for concurrent branches. A `parallel` step
+  runs its branches simultaneously and joins before the damage manifest is captured.
 - The oracle compares three levels: content, metadata, strict metadata. Only content and
   metadata are hard gates. `post_edit` paths are checked for clobbering.
 - Metadata covers mode (including setuid/setgid), ownership, xattrs, hardlink counts of files
@@ -97,8 +105,9 @@ internal/fixture       deterministic fixtures
 internal/baseline      reference rollback strategies
 internal/runner        scenario execution
 internal/sandbox       local and docker drivers, guard, canary
+internal/shim          barrier scripts (files + flock)
 internal/report        JSON and Markdown reports
-scenarios              S01-S09, S21
+scenarios              S01-S09, S13-S15, S18, S21
 docker                 sandbox image
 docs                   design documents
 ```
