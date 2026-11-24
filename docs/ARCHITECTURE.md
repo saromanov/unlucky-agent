@@ -19,7 +19,7 @@ Implementation language: Go.
 
 ## 2. Stack
 
-- **Go 1.24+**, static build, CGO disabled by default (`CGO_ENABLED=0`).
+- **Go 1.27+**, static build, CGO disabled by default (`CGO_ENABLED=0`).
 - **CLI:** `spf13/cobra` (subcommands, flags, generated help). The current skeleton uses the
   standard `flag` package; migration is a separate task.
 - **Scenario config:** `gopkg.in/yaml.v3` with strict mode (`KnownFields(true)`), so a typo in a
@@ -299,7 +299,13 @@ The sequence for one scenario × tool pair:
 12. **Teardown.** `adapter.teardown`, stop the container, export evidence.
 13. **Record.** Persist the result and the metrics.
 
-For concurrent scenarios the steps between 6 and 7 are coordinated through barrier files.
+For concurrent scenarios the steps between 6 and 7 are coordinated through barrier files. Damage
+branches of a `parallel` group run in separate goroutines and the group joins before the damage
+manifest is captured. A restore may also overlap a concurrent writer driven by
+`restore.concurrent_write`: the writer holds the advisory lock on
+`work/.barriers/writer.lock`, signals readiness with `work/.barriers/writer-ready`, the runner
+restores the tree, then drops `work/.barriers/writer-stop`, the marker the writer watches for to
+exit.
 
 ## 9. Damage and determinism
 
@@ -326,9 +332,22 @@ listen to agent hooks must fail mutations issued through a shell.
 
 ### 9.3. Barriers
 
-`shim/barrier` provides synchronization on files and `unix.Flock`. Two-session and torn-state
-scenarios use named barriers: "session A reached point X", "session B started writing". Without
-barriers such scenarios are non-deterministic and become FLAKY.
+Barriers are files under `work/.barriers/` plus `flock`. The runner turns a `barrier` damage step
+into a small POSIX-sh script (`internal/shim`) and executes it through `sandbox.Driver.Exec`, so
+the local and the container drivers synchronize identically. Operations:
+
+- `signal <name>` — create or refresh `.barriers/<name>`;
+- `wait <name>` — wait for the marker file, polling every 20 ms, exit 1 on timeout;
+- `wait-held <name>` — wait until the marker exists and its advisory lock is held
+  (`flock -n <file> -c :` fails), polling every 20 ms;
+- `wait-free <name>` — wait until the lock is acquirable with a blocking
+  `flock -w <seconds> <file> -c :`; a missing marker counts as free.
+
+Ordering is guaranteed by the marker files and the advisory locks; the sleep only paces the
+polling loop, so two-session and torn-state scenarios stay deterministic instead of becoming
+FLAKY. Barrier names are restricted to `[A-Za-z0-9][A-Za-z0-9_.-]*` so a scenario cannot inject
+shell code. The runner adds `.barriers/**` to the allowed-added policy: barrier service files are
+never reported as restore defects.
 
 ### 9.4. Time and environment control
 
@@ -389,7 +408,10 @@ from saved manifests without rerunning the scenario (`unlucky-agent report --fro
 one place so the report and the JSON never disagree.
 
 Aggregation over five runs: median for timings, consensus for the verdict. Divergent verdicts
-yield `FLAKY`; the scenario is excluded from the rating and listed in a separate section.
+yield `FLAKY`; the scenario is excluded from the rating and listed in a separate section. The
+`-repeat N` flag of `unlucky-agent run` runs every scenario N times with a fresh runner and
+aggregates the results: identical verdicts pass through, any divergence becomes `FLAKY` with the
+verdict sequence in the reason.
 
 Published metrics: recall, content precision, metadata score, strict metadata score, clobbered
 count, coverage vector by action class, p50/p95 added latency per agent tool call, checkpoint and
