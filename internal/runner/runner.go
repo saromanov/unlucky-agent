@@ -35,9 +35,11 @@ const writerLock = "writer.lock"
 
 const (
 	checkpointRecoveryPath = "the checkpoint failed; no restore point exists; " +
-		"recovery path: free disk space and retake the checkpoint before editing"
+		"recovery path: fix the cause (for example, free disk space) and retake the checkpoint before editing"
 	restoreRecoveryPath = "the checkpoint snapshot is intact; " +
 		"the restore can be repeated after freeing disk space"
+	externalRestoreRecoveryPath = "the restore is an external command; " +
+		"its snapshot may have been consumed; recovery path: rerun the tool's checkpoint and restore"
 )
 
 // Config holds run parameters.
@@ -195,7 +197,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	baseManifest, err := capture("base")
 	if err != nil {
-		return nil, err
+		captureFail(res, "base", err)
+		return res, nil
 	}
 
 	cpBase, hasCP := drv.(sandbox.CPBaseline)
@@ -256,7 +259,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	damagedManifest, err := capture("damaged")
 	if err != nil {
-		return nil, err
+		captureFail(res, "damaged", err)
+		return res, nil
 	}
 	damageDiff, err := oracle.DiffFiles(baseManifest, damagedManifest, oracle.Policy{})
 	if err != nil {
@@ -273,7 +277,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if hasPostEdit(cfg.Scenario) {
 		p, err := capture("post_edit")
 		if err != nil {
-			return nil, err
+			captureFail(res, "post_edit", err)
+			return res, nil
 		}
 		postEditManifest = p
 	}
@@ -304,7 +309,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		p, err := capture("pre_restore")
 		if err != nil {
-			return nil, err
+			captureFail(res, "pre_restore", err)
+			return res, nil
 		}
 		preRestoreManifest = p
 	}
@@ -353,7 +359,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			if _, err := drv.Exec(ctx, cfg.RestoreCmd, cfg.Timeout); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "restore: " + err.Error()
-				res.RecoveryPath = restoreRecoveryPath
+				res.RecoveryPath = externalRestoreRecoveryPath
 				return res, nil
 			}
 		case cfg.Baseline == "cp-r":
@@ -412,7 +418,8 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	restoredManifest, err := capture("restored")
 	if err != nil {
-		return nil, err
+		captureFail(res, "restored", err)
+		return res, nil
 	}
 
 	diff, err := oracle.DiffFiles(baseManifest, restoredManifest, pol)
@@ -439,6 +446,13 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		res.Reason = verdictReason(diff)
 	}
 	return res, nil
+}
+
+func captureFail(res *Result, name string, err error) {
+	res.Verdict = VerdictError
+	res.Reason = "manifest capture " + name + ": " + err.Error()
+	res.RecoveryPath = "the run state could not be recorded; " +
+		"recovery path: free disk space for the output directory and rerun the scenario"
 }
 
 func validBaseline(name string) bool {
@@ -644,6 +658,7 @@ func Aggregate(results []*Result) *Result {
 		base.Verdict = VerdictFlaky
 		base.Reason = fmt.Sprintf("verdicts diverged over %d runs: %s",
 			len(verdicts), strings.Join(verdicts, ", "))
+		base.RecoveryPath = ""
 	}
 	return &base
 }

@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -438,6 +439,8 @@ func TestScenarioS16CorruptedGit(t *testing.T) {
 	}
 }
 
+// The ~95% pressure is real only in the docker sandbox; on the local driver
+// the 121 MB fill is a bounded large-file round-trip.
 func TestScenarioS17DiskPressure(t *testing.T) {
 	res := runScenario(t, "S17", "cp-r")
 	if res.Verdict != VerdictPass {
@@ -453,6 +456,57 @@ func TestScenarioS17DiskPressure(t *testing.T) {
 	}
 	if len(none.Diff.Missing) == 0 {
 		t.Fatal("the damaged files must be missing without a rollback")
+	}
+}
+
+type failSnapshotDriver struct {
+	sandbox.Driver
+}
+
+func (d failSnapshotDriver) Name() string { return "fail-snapshot" }
+
+func (d failSnapshotDriver) CPSnapshot(ctx context.Context, timeout time.Duration) error {
+	return fmt.Errorf("no space left on device")
+}
+
+func (d failSnapshotDriver) CPRestore(ctx context.Context, timeout time.Duration) error {
+	return nil
+}
+
+func TestCheckpointSnapshotFailure(t *testing.T) {
+	s := loadScenario(t, "S02")
+	res, err := Run(context.Background(), Config{
+		Scenario: s,
+		Baseline: "cp-r",
+		OutDir:   t.TempDir(),
+		Driver:   failSnapshotDriver{sandbox.NewLocal()},
+		Timeout:  30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("a failed snapshot must become an ERROR result, got run error %v", err)
+	}
+	if res.Verdict != VerdictError {
+		t.Fatalf("a failed snapshot must be ERROR, got %s", res.Verdict)
+	}
+	if !strings.HasPrefix(res.Reason, "checkpoint:") {
+		t.Fatalf("the reason must name the checkpoint step: %q", res.Reason)
+	}
+	if res.RecoveryPath == "" {
+		t.Fatal("a failed checkpoint must carry a recovery path")
+	}
+
+	none, err := Run(context.Background(), Config{
+		Scenario: loadScenario(t, "S02"),
+		Baseline: "none",
+		OutDir:   t.TempDir(),
+		Driver:   failSnapshotDriver{sandbox.NewLocal()},
+		Timeout:  30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("the none baseline must not use the snapshot: %v", err)
+	}
+	if none.Verdict != VerdictFail {
+		t.Fatalf("without rollback FAIL is expected, got %s", none.Verdict)
 	}
 }
 

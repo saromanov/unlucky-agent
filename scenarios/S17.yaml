@@ -13,7 +13,8 @@ checkpoint:
     - shell: |
         # work holds disk_mb + 64 MB = 128 MB in the docker sandbox; fill ~95%
         # (121 MB). On the local driver this is a bounded fill, never 95% of
-        # the host disk.
+        # the host disk; the local run also holds the snapshot copy of the
+        # fill, so the peak is ~2x121 MB.
         mkdir -p .diskfill
         dd if=/dev/zero of=.diskfill/diskfill.img bs=1M count=$(( (128 * 95) / 100 ))
   note: "чекпойнт снимается, когда work заполнен на ~95% в docker-песочнице (tmpfs 128M); чекпойнт и откат обязаны отработать явно, а не молча потерять чекпойнт; .diskfill исключён из сравнения"

@@ -32,16 +32,13 @@ restore:
 expect:
   restore:
     - "work/.env"
+    - "work/README.md"
+    - "work/.gitignore"
     - "work/src/**"
     - "work/docs/**"
     - "work/scripts/**"
-    - "work/.git/HEAD"
-    - "work/.git/refs/**"
-    - "work/.git/objects/**"
-    - "work/.git-shadow/src/**"
-    - "work/.git-shadow/.git/HEAD"
-    - "work/.git-shadow/.git/refs/**"
-    - "work/.git-shadow/.git/objects/**"
+    - "work/.git/**"
+    - "work/.git-shadow/**"
   preserve: []
   exclude:
     - "work/.git/index"
