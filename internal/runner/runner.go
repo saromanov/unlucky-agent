@@ -348,6 +348,9 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			res.Verdict = VerdictError
 			res.Reason = err.Error()
 			res.RecoveryPath = restoreRecoveryPath
+			if cfg.RestoreCmd != "" {
+				res.RecoveryPath = externalRestoreRecoveryPath
+			}
 			return res, nil
 		}
 		if res.Verdict != "" {
