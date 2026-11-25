@@ -732,14 +732,19 @@ func TestSyncPaths(t *testing.T) {
 type sizedDriver struct {
 	sandbox.Driver
 
-	work     int64
-	home     int64
-	snapshot int64
+	work         int64
+	home         int64
+	snapshot     int64
+	failDir      bool
+	failSnapshot bool
 }
 
 func (d sizedDriver) Name() string { return "sized" }
 
 func (d sizedDriver) DirBytes(_ context.Context, name string) (int64, error) {
+	if d.failDir {
+		return 0, fmt.Errorf("du: not found")
+	}
 	switch name {
 	case "work":
 		return d.work, nil
@@ -751,6 +756,9 @@ func (d sizedDriver) DirBytes(_ context.Context, name string) (int64, error) {
 }
 
 func (d sizedDriver) SnapshotBytes(_ context.Context, baseline string) (int64, error) {
+	if d.failSnapshot {
+		return 0, fmt.Errorf("du: not found")
+	}
 	if baseline == "none" {
 		return 0, nil
 	}
@@ -783,5 +791,100 @@ func TestStorageSizerDiskMetrics(t *testing.T) {
 	}
 	if want := int64((11 + 2 + 3) << 20); res.PeakDiskBytes != want {
 		t.Fatalf("peak disk=%d, want work+home+snapshot=%d (host staging must not leak in)", res.PeakDiskBytes, want)
+	}
+}
+
+func TestStorageSizerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		drv  sizedDriver
+	}{
+		{"dir", sizedDriver{Driver: sandbox.NewLocal(), failDir: true}},
+		{"snapshot", sizedDriver{Driver: sandbox.NewLocal(), failSnapshot: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+			res, err := Run(context.Background(), Config{
+				Scenario: s,
+				Baseline: "cp-r",
+				OutDir:   t.TempDir(),
+				Driver:   tc.drv,
+				Timeout:  60 * time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Verdict != VerdictError {
+				t.Fatalf("a failed disk measurement must be ERROR, got %s", res.Verdict)
+			}
+			if !strings.Contains(res.Reason, "disk measurement:") {
+				t.Fatalf("the reason must name the measurement, got %q", res.Reason)
+			}
+			if res.RecoveryPath == "" {
+				t.Fatal("a failed disk measurement must carry a recovery path")
+			}
+		})
+	}
+}
+
+func TestParallelRecordsNestedTimings(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{
+		{Parallel: [][]scenario.DamageStep{
+			{{ToolCall: &scenario.ToolCall{
+				Name: "append_line",
+				Args: map[string]string{"cmd": "printf a > a.txt"},
+			}}},
+			{{Shell: "printf b > b.txt"}},
+		}},
+		{Shell: "rm -rf docs"},
+	}, []string{"work/docs/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+
+	var parallel, tool, shell int
+	for _, step := range res.Steps {
+		switch step.Kind {
+		case "parallel":
+			parallel++
+		case string(scenario.StepToolCall):
+			tool++
+			if step.US <= 0 {
+				t.Fatalf("a nested tool call must carry a positive duration: %+v", step)
+			}
+			if step.Index != 0 {
+				t.Fatalf("a nested tool call must carry the group index 0, got %d", step.Index)
+			}
+		case string(scenario.StepShell):
+			shell++
+		}
+	}
+	if parallel != 1 || tool != 1 || shell != 2 {
+		t.Fatalf("timings parallel=%d tool=%d shell=%d, want 1/1/2: %+v", parallel, tool, shell, res.Steps)
+	}
+}
+
+func TestPreCheckpointRepeat(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	s.Checkpoint.Pre = []scenario.DamageStep{{
+		Shell:  "printf '%s\n' {{i}} > pre-{{i}}.txt",
+		Repeat: 3,
+	}}
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	paths := manifestPaths(t, res.Artifacts["restored"])
+	for _, want := range []string{"work/pre-0.txt", "work/pre-1.txt", "work/pre-2.txt"} {
+		if !paths[want] {
+			t.Fatalf("%s is missing from the restored manifest", want)
+		}
+	}
+	if paths["work/pre-{{i}}.txt"] {
+		t.Fatal("the placeholder must be expanded in a pre-checkpoint step")
+	}
+	if len(res.Steps) != 1 || res.Steps[0].Kind != string(scenario.StepShell) || res.Steps[0].Index != 0 {
+		t.Fatalf("pre-checkpoint steps must not be recorded as damage timings: %+v", res.Steps)
 	}
 }

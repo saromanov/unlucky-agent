@@ -54,7 +54,7 @@ type Docker struct {
 // DockerConfig configures the docker driver.
 type DockerConfig struct {
 	// Image is the sandbox image. It must contain sh, find and tar; the
-	// scenarios add git where needed.
+	// scenarios add git where needed. The disk metrics also need du.
 	Image string
 	// EvidenceDir is the only host bind mount, created by the driver.
 	EvidenceDir string

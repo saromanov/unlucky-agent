@@ -73,6 +73,10 @@ pre-flight guard verifies the uid, `$HOME`, the `/.dockerenv` marker and every m
 `/proc/self/mountinfo`; a disk-backed mount outside `/sandbox/evidence` (and the docker
 `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` files) refuses the run with `GUARD_FAILED`.
 
+A custom image must provide `sh`, `find`, `tar` and `du`. `du` feeds the cost metrics
+(`disk_work_bytes`, `disk_snapshot_bytes`, `peak_disk_bytes`); when it is missing the run fails
+with a `disk measurement` error instead of reporting zeros.
+
 A host canary writes marker files into the temp directory, the output directory and `$HOME` and
 re-hashes them after the run. Any change or removal fails the run with `CANARY_FAILED`, even when
 all scenarios passed.
