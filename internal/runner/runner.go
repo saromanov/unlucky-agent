@@ -75,7 +75,7 @@ type Result struct {
 	Diff              *oracle.Result    `json:"diff,omitempty"`
 	DamageMS          int64             `json:"damage_ms"`
 	RestoreMS         int64             `json:"restore_ms"`
-	CheckpointTimesMS []int64           `json:"checkpoint_times_ms,omitempty"`
+	CheckpointTimesUS []int64           `json:"checkpoint_times_us,omitempty"`
 	DiskSnapshotBytes []int64           `json:"disk_snapshot_bytes,omitempty"`
 	DiskWorkBytes     int64             `json:"disk_work_bytes,omitempty"`
 	PeakDiskBytes     int64             `json:"peak_disk_bytes,omitempty"`
@@ -89,7 +89,7 @@ type Result struct {
 type StepTiming struct {
 	Index int    `json:"index"`
 	Kind  string `json:"kind"`
-	MS    int64  `json:"ms"`
+	US    int64  `json:"us"`
 }
 
 // Percentile returns the nearest-rank percentile of values, p in [0, 100].
@@ -245,19 +245,28 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		switch cfg.Baseline {
 		case "cp-r":
 			if hasCP {
-				return cpBase.CPSnapshot(ctx, cfg.Timeout)
+				if err := cpBase.CPSnapshot(ctx, cfg.Timeout); err != nil {
+					return err
+				}
+			} else if err := baseline.Snapshot(work, snap); err != nil {
+				return err
 			}
-			return baseline.Snapshot(work, snap)
 		case "perfect":
 			if hasPerfect {
-				return perfectBase.PerfectSnapshot(ctx, cfg.Timeout)
+				if err := perfectBase.PerfectSnapshot(ctx, cfg.Timeout); err != nil {
+					return err
+				}
+			} else if err := baseline.PerfectSnapshot(work, home, snapWork, snapHome); err != nil {
+				return err
 			}
-			return baseline.PerfectSnapshot(work, home, snapWork, snapHome)
 		case "tar":
-			return baseline.TarSnapshot(work, tarSnap)
+			if err := baseline.TarSnapshot(work, tarSnap); err != nil {
+				return err
+			}
 		default:
 			return nil
 		}
+		return syncCheckpoint(ctx, drv, cfg.Baseline, root, cfg.Timeout)
 	}
 
 	res.DiskWorkBytes = treeBytes(work)
@@ -271,7 +280,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 				res.RecoveryPath = checkpointRecoveryPath
 				return res, nil
 			}
-			res.CheckpointTimesMS = append(res.CheckpointTimesMS, time.Since(start).Milliseconds())
+			res.CheckpointTimesUS = append(res.CheckpointTimesUS, time.Since(start).Microseconds())
 			snapshotBytes := snapshotStorageBytes(ctx, drv, cfg.Baseline, root)
 			res.DiskSnapshotBytes = append(res.DiskSnapshotBytes, snapshotBytes)
 			res.noteDisk(drv, root, snapshotBytes)
@@ -433,6 +442,14 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 			// baseline none: no rollback is performed.
 		}
+		if cfg.RestoreCmd != "" || cfg.Baseline != "none" {
+			if err := syncRestore(ctx, drv, cfg.Baseline, work, home, cfg.Timeout); err != nil {
+				res.Verdict = VerdictError
+				res.Reason = "restore sync: " + err.Error()
+				res.RecoveryPath = restoreRecoveryPath
+				return res, nil
+			}
+		}
 		res.RestoreMS = time.Since(restoreStart).Milliseconds()
 	}
 	res.noteDisk(drv, root, res.lastSnapshotBytes())
@@ -521,6 +538,20 @@ func treeBytes(path string) int64 {
 	return total
 }
 
+// snapshotAreas returns the host paths that hold the checkpoint state.
+func snapshotAreas(baselineName, root string) []string {
+	switch baselineName {
+	case "cp-r":
+		return []string{filepath.Join(root, "snapshot")}
+	case "perfect":
+		return []string{filepath.Join(root, "snapshot-work"), filepath.Join(root, "snapshot-home")}
+	case "tar":
+		return []string{filepath.Join(root, "snapshot.tar")}
+	default:
+		return nil
+	}
+}
+
 // snapshotStorageBytes reports the allocated size of the checkpoint state.
 func snapshotStorageBytes(ctx context.Context, drv sandbox.Driver, baselineName, root string) int64 {
 	if sizer, ok := drv.(sandbox.SnapshotSizer); ok {
@@ -529,16 +560,107 @@ func snapshotStorageBytes(ctx context.Context, drv sandbox.Driver, baselineName,
 		}
 		return 0
 	}
-	switch baselineName {
-	case "cp-r":
-		return treeBytes(filepath.Join(root, "snapshot"))
-	case "perfect":
-		return treeBytes(filepath.Join(root, "snapshot-work")) + treeBytes(filepath.Join(root, "snapshot-home"))
-	case "tar":
-		return treeBytes(filepath.Join(root, "snapshot.tar"))
-	default:
-		return 0
+	var total int64
+	for _, p := range snapshotAreas(baselineName, root) {
+		total += treeBytes(p)
 	}
+	return total
+}
+
+// syncCheckpoint flushes the checkpoint state: the checkpoint is not complete
+// until its data is durable, and consecutive measurements must not depend on
+// leftover writeback. A container driver syncs its own storage.
+func syncCheckpoint(ctx context.Context, drv sandbox.Driver, baselineName, root string, timeout time.Duration) error {
+	if _, ok := drv.(sandbox.SnapshotSizer); ok {
+		if _, err := drv.Exec(ctx, "sync", timeout); err != nil {
+			return fmt.Errorf("checkpoint sync: %w", err)
+		}
+		return nil
+	}
+	if err := syncPaths(snapshotAreas(baselineName, root)); err != nil {
+		return fmt.Errorf("checkpoint sync: %w", err)
+	}
+	return nil
+}
+
+// syncRestore flushes the restored trees; perfect restores both work and home.
+func syncRestore(ctx context.Context, drv sandbox.Driver, baselineName, work, home string, timeout time.Duration) error {
+	if _, ok := drv.(sandbox.SnapshotSizer); ok {
+		if _, err := drv.Exec(ctx, "sync", timeout); err != nil {
+			return fmt.Errorf("restore sync: %w", err)
+		}
+		return nil
+	}
+	areas := []string{work}
+	if baselineName == "perfect" {
+		areas = append(areas, home)
+	}
+	if err := syncPaths(areas); err != nil {
+		return fmt.Errorf("restore sync: %w", err)
+	}
+	return nil
+}
+
+// syncPaths fsyncs every regular file and directory under paths. A missing
+// path is skipped.
+func syncPaths(paths []string) error {
+	for _, p := range paths {
+		info, err := os.Lstat(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if info.Mode().IsRegular() {
+			if err := syncFile(p); err != nil {
+				return err
+			}
+			return syncDir(filepath.Dir(p))
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if err := filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return syncDir(q)
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			return syncFile(q)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func syncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 // lastSnapshotBytes returns the snapshot size of the last checkpoint.
@@ -600,7 +722,7 @@ func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, ti
 			res.Steps = append(res.Steps, StepTiming{
 				Index: i,
 				Kind:  string(kind),
-				MS:    time.Since(start).Milliseconds(),
+				US:    time.Since(start).Microseconds(),
 			})
 			continue
 		}
@@ -612,7 +734,7 @@ func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, ti
 			res.Steps = append(res.Steps, StepTiming{
 				Index: i,
 				Kind:  string(kind),
-				MS:    time.Since(start).Milliseconds(),
+				US:    time.Since(start).Microseconds(),
 			})
 		}
 	}

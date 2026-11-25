@@ -49,21 +49,22 @@ func TestCostSection(t *testing.T) {
 		ScenarioID:        "S19",
 		Verdict:           runner.VerdictPass,
 		RestoreMS:         1234,
-		CheckpointTimesMS: []int64{10, 20, 30, 40, 50},
+		CheckpointTimesUS: []int64{10000, 20000, 30000, 40000, 50000},
 		DiskSnapshotBytes: []int64{1 << 20, 2 << 20},
 		DiskWorkBytes:     1 << 30,
 		PeakDiskBytes:     2 << 30,
 		Steps: []runner.StepTiming{
-			{Index: 0, Kind: "toolcall", MS: 7},
-			{Index: 0, Kind: "toolcall", MS: 9},
-			{Index: 1, Kind: "shell", MS: 100},
+			{Index: 0, Kind: "toolcall", US: 700},
+			{Index: 0, Kind: "toolcall", US: 900},
+			{Index: 1, Kind: "shell", US: 100},
 		},
 	}})
 	if !strings.Contains(out, "## Cost") {
 		t.Fatalf("the cost section must be rendered:\n%s", out)
 	}
-	if !strings.Contains(out, "| S19 | 5 | 30 | 50 | 1234 | 2 | 7 | 9 | 1.00 GiB | 2.00 MiB | 2.00 GiB |") {
-		t.Fatalf("the cost row must carry the series:\n%s", out)
+	want := "| S19 | 5 | 30.0 ms | 50.0 ms | 1234.0 ms | 2 | 700 µs | 900 µs | 1.00 GiB | 2.00 MiB | 2.00 GiB |"
+	if !strings.Contains(out, want) {
+		t.Fatalf("the cost row must carry the series, want %q:\n%s", want, out)
 	}
 	if strings.Index(out, "## Cost") > strings.Index(out, "## Summary") {
 		t.Fatalf("the cost section must precede the summary:\n%s", out)
@@ -78,6 +79,21 @@ func TestCostSectionOmitted(t *testing.T) {
 	}})
 	if strings.Contains(out, "## Cost") {
 		t.Fatalf("a scenario without cost data must not render the section:\n%s", out)
+	}
+}
+
+func TestHumanDuration(t *testing.T) {
+	cases := map[int64]string{
+		0:        "0 µs",
+		999:      "999 µs",
+		1000:     "1.0 ms",
+		1250:     "1.2 ms",
+		15769000: "15769.0 ms",
+	}
+	for in, want := range cases {
+		if got := humanDuration(in); got != want {
+			t.Fatalf("humanDuration(%d)=%q, want %q", in, got, want)
+		}
 	}
 }
 

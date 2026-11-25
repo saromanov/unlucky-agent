@@ -87,10 +87,11 @@ all scenarios passed.
   through an agent tool), plus `post_edit` for edits made after the checkpoint and `barrier`
   steps (`signal`, `wait`, `wait-held`, `wait-free`) for concurrent branches. A `parallel` step
   runs its branches simultaneously and joins before the damage manifest is captured.
-- `repeat: N` on a damage step executes it N times and times every execution into `steps`; the
-  `{{i}}` placeholder is replaced with the 0-based iteration index in the `shell`, `post_edit`
-  and `toolcall` command text. `repeat: N` on the checkpoint takes N checkpoints into the same
-  storage slot and records `checkpoint_times_ms` and `disk_snapshot_bytes` per checkpoint.
+- `repeat: N` on a damage step executes it N times and times every execution into `steps` in
+  microseconds (`us`); the `{{i}}` placeholder is replaced with the 0-based iteration index in
+  the `shell`, `post_edit` and `toolcall` command text. `repeat: N` on the checkpoint takes N
+  checkpoints into the same storage slot and records `checkpoint_times_us` and
+  `disk_snapshot_bytes` per checkpoint.
 - `checkpoint.pre` steps run before the checkpoint is taken (used by S17 to fill the disk to
   ~95% of the work tmpfs in the docker sandbox; a bounded fill on the local driver). The local
   run additionally holds the snapshot copy of the fill (~2x121 MB peak); the pressure itself
@@ -116,13 +117,16 @@ The `cost` group measures what rollback costs on a 50k-file, ~1.2 GiB repository
 fixture; every file at directory depth 8). S19 measures the added latency per agent tool call
 over 100 calls and the checkpoint/restore path; S20 measures 200 consecutive checkpoints for
 degradation and space leaks. The report gains a `Cost` section and JSON gains
-`checkpoint_times_ms`, `disk_snapshot_bytes`, `disk_work_bytes`, `peak_disk_bytes` and `steps`.
+`checkpoint_times_us`, `disk_snapshot_bytes`, `disk_work_bytes`, `peak_disk_bytes` and `steps`.
 
-- Tool-call latency: p50/p95 of the per-call duration over the repeats, with the `none` baseline
-  as the reference (no checkpoint, no rollback).
+- Tool-call latency: p50/p95 of the per-call duration over the repeats, in microseconds, with
+  the `none` baseline as the reference (no checkpoint, no rollback).
 - Checkpoint cost: p50/p95 over the checkpoint series, plus the number of checkpoints.
 - Restore time, work-tree allocated bytes, snapshot allocated bytes and peak disk over the run
   root (work + home + snapshot).
+- Checkpoint and restore durations include an fsync of the snapshot area and of the restored
+  trees: a rollback is not complete until its data is durable, and a durable measurement keeps
+  consecutive runs independent of leftover writeback.
 - Numbers are reproducible within 10% across five runs on one machine; every checkpoint reuses
   one storage slot, so a growing snapshot size in S20 is a space leak.
 

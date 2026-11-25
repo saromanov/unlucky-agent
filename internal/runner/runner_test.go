@@ -613,6 +613,11 @@ func TestRepeatExpandsIterationPlaceholder(t *testing.T) {
 	if counts[string(scenario.StepToolCall)] != 2 {
 		t.Fatalf("toolcall timings=%d, want 2: %+v", counts[string(scenario.StepToolCall)], res.Steps)
 	}
+	for _, step := range res.Steps {
+		if step.Kind == string(scenario.StepToolCall) && step.US <= 0 {
+			t.Fatalf("a tool call must carry a positive microsecond duration: %+v", step)
+		}
+	}
 
 	paths := manifestPaths(t, res.Artifacts["damaged"])
 	for _, want := range []string{
@@ -655,8 +660,8 @@ func TestCheckpointRepeatSeries(t *testing.T) {
 	if res.Verdict != VerdictPass {
 		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
 	}
-	if len(res.CheckpointTimesMS) != 3 {
-		t.Fatalf("checkpoint series=%v, want 3 values", res.CheckpointTimesMS)
+	if len(res.CheckpointTimesUS) != 3 {
+		t.Fatalf("checkpoint series=%v, want 3 values", res.CheckpointTimesUS)
 	}
 	if len(res.DiskSnapshotBytes) != 3 {
 		t.Fatalf("snapshot series=%v, want 3 values", res.DiskSnapshotBytes)
@@ -703,5 +708,23 @@ func TestPercentile(t *testing.T) {
 	}
 	if values[0] != 50 {
 		t.Fatal("Percentile must not reorder the input")
+	}
+}
+
+func TestSyncPaths(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncPaths([]string{root, filepath.Join(root, "missing")}); err != nil {
+		t.Fatalf("syncPaths must flush an existing tree and skip a missing path: %v", err)
+	}
+	file := filepath.Join(sub, "f.txt")
+	if err := syncPaths([]string{file}); err != nil {
+		t.Fatalf("syncPaths must flush a single regular file: %v", err)
 	}
 }

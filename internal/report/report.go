@@ -97,11 +97,13 @@ Every entry states what still can be recovered and how.
 {{end}}{{if .Cost}}## Cost
 
 Checkpoint and tool-call percentiles cover the repeated calls of the run; the
-none baseline is the added-latency reference. Disk figures are allocated bytes.
+none baseline is the added-latency reference. Durations below one millisecond
+are printed in microseconds. Checkpoint and restore durations include the sync
+that makes the copied state durable. Disk figures are allocated bytes.
 
-| Scenario | Checkpoints | Checkpoint p50 ms | Checkpoint p95 ms | Restore ms | Tool calls | Tool p50 ms | Tool p95 ms | Work disk | Snapshot disk | Peak disk |
+| Scenario | Checkpoints | Checkpoint p50 | Checkpoint p95 | Restore | Tool calls | Tool p50 | Tool p95 | Work disk | Snapshot disk | Peak disk |
 |---|---|---|---|---|---|---|---|---|---|---|
-{{range .Cost}}| {{.ScenarioID}} | {{.Checkpoints}} | {{.CheckpointP50}} | {{.CheckpointP95}} | {{.RestoreMS}} | {{.ToolCalls}} | {{.ToolP50}} | {{.ToolP95}} | {{bytes .DiskWork}} | {{bytes .DiskSnapshot}} | {{bytes .PeakDisk}} |
+{{range .Cost}}| {{.ScenarioID}} | {{.Checkpoints}} | {{duration .CheckpointP50US}} | {{duration .CheckpointP95US}} | {{duration .RestoreUS}} | {{.ToolCalls}} | {{duration .ToolP50US}} | {{duration .ToolP95US}} | {{bytes .DiskWork}} | {{bytes .DiskSnapshot}} | {{bytes .PeakDisk}} |
 {{end}}
 {{end}}## Summary
 
@@ -109,8 +111,9 @@ none baseline is the added-latency reference. Disk figures are allocated bytes.
 `
 
 var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{
-	"note":  firstSentence,
-	"bytes": humanBytes,
+	"note":     firstSentence,
+	"bytes":    humanBytes,
+	"duration": humanDuration,
 }).Parse(markdownTmpl))
 
 type mdData struct {
@@ -121,19 +124,19 @@ type mdData struct {
 	Cost          []CostRow
 }
 
-// CostRow is one line of the cost section.
+// CostRow is one line of the cost section. Durations are microseconds.
 type CostRow struct {
-	ScenarioID    string
-	Checkpoints   int
-	CheckpointP50 int64
-	CheckpointP95 int64
-	RestoreMS     int64
-	ToolCalls     int
-	ToolP50       int64
-	ToolP95       int64
-	DiskWork      int64
-	DiskSnapshot  int64
-	PeakDisk      int64
+	ScenarioID      string
+	Checkpoints     int
+	CheckpointP50US int64
+	CheckpointP95US int64
+	RestoreUS       int64
+	ToolCalls       int
+	ToolP50US       int64
+	ToolP95US       int64
+	DiskWork        int64
+	DiskSnapshot    int64
+	PeakDisk        int64
 }
 
 // WriteMarkdown writes a human-readable report.
@@ -154,21 +157,21 @@ func costRows(r *Report) []CostRow {
 	var out []CostRow
 	for _, res := range r.Results {
 		tool := toolCallTimes(res.Steps)
-		if len(res.CheckpointTimesMS) == 0 && len(tool) == 0 {
+		if len(res.CheckpointTimesUS) == 0 && len(tool) == 0 {
 			continue
 		}
 		out = append(out, CostRow{
-			ScenarioID:    res.ScenarioID,
-			Checkpoints:   len(res.CheckpointTimesMS),
-			CheckpointP50: runner.Percentile(res.CheckpointTimesMS, 50),
-			CheckpointP95: runner.Percentile(res.CheckpointTimesMS, 95),
-			RestoreMS:     res.RestoreMS,
-			ToolCalls:     len(tool),
-			ToolP50:       runner.Percentile(tool, 50),
-			ToolP95:       runner.Percentile(tool, 95),
-			DiskWork:      res.DiskWorkBytes,
-			DiskSnapshot:  maxSnapshot(res.DiskSnapshotBytes),
-			PeakDisk:      res.PeakDiskBytes,
+			ScenarioID:      res.ScenarioID,
+			Checkpoints:     len(res.CheckpointTimesUS),
+			CheckpointP50US: runner.Percentile(res.CheckpointTimesUS, 50),
+			CheckpointP95US: runner.Percentile(res.CheckpointTimesUS, 95),
+			RestoreUS:       res.RestoreMS * 1000,
+			ToolCalls:       len(tool),
+			ToolP50US:       runner.Percentile(tool, 50),
+			ToolP95US:       runner.Percentile(tool, 95),
+			DiskWork:        res.DiskWorkBytes,
+			DiskSnapshot:    maxSnapshot(res.DiskSnapshotBytes),
+			PeakDisk:        res.PeakDiskBytes,
 		})
 	}
 	return out
@@ -178,7 +181,7 @@ func toolCallTimes(steps []runner.StepTiming) []int64 {
 	var out []int64
 	for _, s := range steps {
 		if s.Kind == "toolcall" {
-			out = append(out, s.MS)
+			out = append(out, s.US)
 		}
 	}
 	return out
@@ -192,6 +195,15 @@ func maxSnapshot(values []int64) int64 {
 		}
 	}
 	return maxValue
+}
+
+// humanDuration formats a microsecond duration: one decimal of a millisecond
+// from 1 ms up, whole microseconds below.
+func humanDuration(us int64) string {
+	if us < 1000 {
+		return fmt.Sprintf("%d µs", us)
+	}
+	return fmt.Sprintf("%.1f ms", float64(us)/1000)
 }
 
 // humanBytes formats an allocated byte count with binary units.
