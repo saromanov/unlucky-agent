@@ -63,19 +63,6 @@ func (r *Result) Pass() bool {
 	return len(r.Missing) == 0 && len(r.Changed) == 0 && len(r.Clobbered) == 0
 }
 
-// DiffFiles compares the expected manifest with the observed one.
-func DiffFiles(expectedPath, observedPath string, pol Policy) (*Result, error) {
-	base, err := loadEntries(expectedPath)
-	if err != nil {
-		return nil, fmt.Errorf("expected manifest: %w", err)
-	}
-	obs, err := loadEntries(observedPath)
-	if err != nil {
-		return nil, fmt.Errorf("observed manifest: %w", err)
-	}
-	return Diff(base, obs, pol), nil
-}
-
 // Diff compares two entry sets.
 func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 	index := make(map[string]manifest.Entry, len(obs))
@@ -85,46 +72,8 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 
 	res := &Result{}
 	for _, b := range base {
-		if pol.Excluded(b.Path) {
-			res.Skipped++
-			continue
-		}
-		if !pol.Wants(b.Path) {
-			continue
-		}
-		res.Expected++
-
 		o, ok := index[b.Path]
-		if !ok {
-			res.Missing = append(res.Missing, Change{Path: b.Path, Kind: KindMissing, Detail: b.Type})
-			continue
-		}
-		if b.Type != o.Type || b.Hash != o.Hash || b.Link != o.Link {
-			res.Changed = append(res.Changed, Change{
-				Path:   b.Path,
-				Kind:   KindChanged,
-				Detail: fmt.Sprintf("type %s->%s hash %s->%s", b.Type, o.Type, short(b.Hash), short(o.Hash)),
-			})
-			continue
-		}
-		detail := ""
-		if b.Mode != o.Mode || b.UID != o.UID || b.GID != o.GID || !xattrEqual(b.Xattr, o.Xattr) {
-			detail = fmt.Sprintf("mode %04o->%04o uid %d->%d gid %d->%d", b.Mode, o.Mode, b.UID, o.UID, b.GID, o.GID)
-		}
-		if b.NLink != o.NLink && b.Type != "dir" {
-			// A directory nlink is 2 plus its subdirectory count, so it drops
-			// whenever a child directory is missing. That loss is already a
-			// missing defect; only file nlink carries hardlink information.
-			detail = appendDetail(detail, fmt.Sprintf("nlink %d->%d", b.NLink, o.NLink))
-		}
-		if blocksDrift(b.Blocks, o.Blocks) {
-			detail = appendDetail(detail, fmt.Sprintf("blocks %d->%d", b.Blocks, o.Blocks))
-		}
-		if detail != "" {
-			res.Meta = append(res.Meta, Change{Path: b.Path, Kind: KindMeta, Detail: detail})
-			continue
-		}
-		res.Matched++
+		classify(res, b, o, ok, pol)
 	}
 
 	known := make(map[string]struct{}, len(base))
@@ -144,6 +93,51 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 		res.Added = append(res.Added, Change{Path: o.Path, Kind: KindAdded, Detail: o.Type})
 	}
 	return res
+}
+
+// classify compares one base entry with its observed counterpart. It is shared
+// by the in-memory Diff and the streaming merge-join, so both paths apply the
+// same policy and defect rules.
+func classify(res *Result, b, o manifest.Entry, matched bool, pol Policy) {
+	if pol.Excluded(b.Path) {
+		res.Skipped++
+		return
+	}
+	if !pol.Wants(b.Path) {
+		return
+	}
+	res.Expected++
+
+	if !matched {
+		res.Missing = append(res.Missing, Change{Path: b.Path, Kind: KindMissing, Detail: b.Type})
+		return
+	}
+	if b.Type != o.Type || b.Hash != o.Hash || b.Link != o.Link {
+		res.Changed = append(res.Changed, Change{
+			Path:   b.Path,
+			Kind:   KindChanged,
+			Detail: fmt.Sprintf("type %s->%s hash %s->%s", b.Type, o.Type, short(b.Hash), short(o.Hash)),
+		})
+		return
+	}
+	detail := ""
+	if b.Mode != o.Mode || b.UID != o.UID || b.GID != o.GID || !xattrEqual(b.Xattr, o.Xattr) {
+		detail = fmt.Sprintf("mode %04o->%04o uid %d->%d gid %d->%d", b.Mode, o.Mode, b.UID, o.UID, b.GID, o.GID)
+	}
+	if b.NLink != o.NLink && b.Type != "dir" {
+		// A directory nlink is 2 plus its subdirectory count, so it drops
+		// whenever a child directory is missing. That loss is already a
+		// missing defect; only file nlink carries hardlink information.
+		detail = appendDetail(detail, fmt.Sprintf("nlink %d->%d", b.NLink, o.NLink))
+	}
+	if blocksDrift(b.Blocks, o.Blocks) {
+		detail = appendDetail(detail, fmt.Sprintf("blocks %d->%d", b.Blocks, o.Blocks))
+	}
+	if detail != "" {
+		res.Meta = append(res.Meta, Change{Path: b.Path, Kind: KindMeta, Detail: detail})
+		return
+	}
+	res.Matched++
 }
 
 // Clobber compares post-T edits with the restored state and returns
