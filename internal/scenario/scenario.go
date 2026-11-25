@@ -306,6 +306,9 @@ func validateStep(step DamageStep) error {
 			return err
 		}
 	}
+	if kind == StepParallel && step.Repeat > 1 {
+		return fmt.Errorf("repeat is supported only on shell/post_edit/toolcall steps")
+	}
 	if kind != StepParallel {
 		return nil
 	}
@@ -322,6 +325,9 @@ func validateStep(step DamageStep) error {
 			}
 			if nested.Repeat < 0 {
 				return fmt.Errorf("parallel branch %d step %d: repeat must be >= 1", j, k)
+			}
+			if nested.Repeat > 1 {
+				return fmt.Errorf("parallel branch %d step %d: repeat is supported only on shell/post_edit/toolcall steps", j, k)
 			}
 			if nested.Barrier != "" {
 				if _, _, err := ParseBarrier(nested.Barrier); err != nil {

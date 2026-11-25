@@ -28,4 +28,4 @@ limits:
 
 resources:
   disk_mb: 1600
-  memory_mb: 512
+  memory_mb: 4096

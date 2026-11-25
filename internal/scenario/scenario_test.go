@@ -259,6 +259,31 @@ func TestValidateRepeat(t *testing.T) {
 	}
 }
 
+func TestValidateParallelRepeat(t *testing.T) {
+	group := baseScenario(DamageStep{
+		Repeat:   2,
+		Parallel: [][]DamageStep{{{Shell: "true"}}},
+	})
+	err := group.Validate()
+	if err == nil || !strings.Contains(err.Error(), "repeat is supported only on shell/post_edit/toolcall steps") {
+		t.Fatalf("a repeated parallel group must be rejected, got: %v", err)
+	}
+
+	branch := baseScenario(DamageStep{Parallel: [][]DamageStep{
+		{{Shell: "true"}},
+		{{Shell: "true", Repeat: 2}},
+	}})
+	err = branch.Validate()
+	if err == nil || !strings.Contains(err.Error(), "parallel branch 1 step 0: repeat is supported only on shell/post_edit/toolcall steps") {
+		t.Fatalf("a repeated nested step must be rejected, got: %v", err)
+	}
+
+	ok := baseScenario(DamageStep{Repeat: 1, Parallel: [][]DamageStep{{{Shell: "true", Repeat: 1}}}})
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("repeat of 0/1 must stay valid in a parallel group: %v", err)
+	}
+}
+
 func TestLoadCostScenarios(t *testing.T) {
 	for _, id := range []string{"S19", "S20"} {
 		s, err := Load(filepath.Join("..", "..", "scenarios", id+".yaml"))

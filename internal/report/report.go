@@ -98,8 +98,9 @@ Every entry states what still can be recovered and how.
 
 Checkpoint and tool-call percentiles cover the repeated calls of the run; the
 none baseline is the added-latency reference. Durations below one millisecond
-are printed in microseconds. Checkpoint and restore durations include the sync
-that makes the copied state durable. Disk figures are allocated bytes.
+are printed in microseconds. For the local driver, checkpoint and restore
+durations include the sync that makes the copied state durable. Disk figures are
+allocated bytes.
 
 | Scenario | Checkpoints | Checkpoint p50 | Checkpoint p95 | Restore | Tool calls | Tool p50 | Tool p95 | Work disk | Snapshot disk | Peak disk |
 |---|---|---|---|---|---|---|---|---|---|---|

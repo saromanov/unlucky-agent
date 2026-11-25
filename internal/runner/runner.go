@@ -266,11 +266,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 			return nil
 		}
-		return syncCheckpoint(ctx, drv, cfg.Baseline, root, cfg.Timeout)
+		return syncCheckpoint(drv, cfg.Baseline, root)
 	}
 
-	res.DiskWorkBytes = treeBytes(work)
-	res.noteDisk(drv, root, 0)
+	res.DiskWorkBytes = driverDirBytes(ctx, drv, "work", work)
+	res.noteDisk(ctx, drv, root, work, home, 0)
 	if cfg.Baseline != "none" {
 		for range checkpointRepeat(cfg.Scenario) {
 			start := time.Now()
@@ -283,7 +283,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			res.CheckpointTimesUS = append(res.CheckpointTimesUS, time.Since(start).Microseconds())
 			snapshotBytes := snapshotStorageBytes(ctx, drv, cfg.Baseline, root)
 			res.DiskSnapshotBytes = append(res.DiskSnapshotBytes, snapshotBytes)
-			res.noteDisk(drv, root, snapshotBytes)
+			res.noteDisk(ctx, drv, root, work, home, snapshotBytes)
 		}
 	}
 
@@ -294,7 +294,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return res, nil
 	}
 	res.DamageMS = time.Since(start).Milliseconds()
-	res.noteDisk(drv, root, res.lastSnapshotBytes())
+	res.noteDisk(ctx, drv, root, work, home, res.lastSnapshotBytes())
 
 	damagedManifest, err := capture("damaged")
 	if err != nil {
@@ -443,16 +443,16 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 			// baseline none: no rollback is performed.
 		}
 		if cfg.RestoreCmd != "" || cfg.Baseline != "none" {
-			if err := syncRestore(ctx, drv, cfg.Baseline, work, home, cfg.Timeout); err != nil {
+			if err := syncRestore(drv, cfg.Baseline, work, home); err != nil {
 				res.Verdict = VerdictError
-				res.Reason = "restore sync: " + err.Error()
+				res.Reason = "restore: " + err.Error()
 				res.RecoveryPath = restoreRecoveryPath
 				return res, nil
 			}
 		}
 		res.RestoreMS = time.Since(restoreStart).Milliseconds()
 	}
-	res.noteDisk(drv, root, res.lastSnapshotBytes())
+	res.noteDisk(ctx, drv, root, work, home, res.lastSnapshotBytes())
 
 	if cfg.Scenario.Restore.ConcurrentWrite != "" {
 		if _, err := drv.Exec(ctx, shim.SignalScript("writer-stop"), cfg.Timeout); err != nil {
@@ -567,28 +567,36 @@ func snapshotStorageBytes(ctx context.Context, drv sandbox.Driver, baselineName,
 	return total
 }
 
+// driverDirBytes reports the allocated size of a scenario tree: the sandbox
+// tree for a StorageSizer driver, the host staging tree otherwise.
+func driverDirBytes(ctx context.Context, drv sandbox.Driver, name, hostDir string) int64 {
+	if sizer, ok := drv.(sandbox.StorageSizer); ok {
+		if n, err := sizer.DirBytes(ctx, name); err == nil {
+			return n
+		}
+		return 0
+	}
+	return treeBytes(hostDir)
+}
+
 // syncCheckpoint flushes the checkpoint state: the checkpoint is not complete
 // until its data is durable, and consecutive measurements must not depend on
-// leftover writeback. A container driver syncs its own storage.
-func syncCheckpoint(ctx context.Context, drv sandbox.Driver, baselineName, root string, timeout time.Duration) error {
-	if _, ok := drv.(sandbox.SnapshotSizer); ok {
-		if _, err := drv.Exec(ctx, "sync", timeout); err != nil {
-			return fmt.Errorf("checkpoint sync: %w", err)
-		}
+// leftover writeback. Only the local driver needs the flush: container storage
+// is tmpfs, which has no writeback to wait for and nothing durable to keep.
+func syncCheckpoint(drv sandbox.Driver, baselineName, root string) error {
+	if drv.Name() != "local" {
 		return nil
 	}
 	if err := syncPaths(snapshotAreas(baselineName, root)); err != nil {
-		return fmt.Errorf("checkpoint sync: %w", err)
+		return fmt.Errorf("sync: %w", err)
 	}
 	return nil
 }
 
 // syncRestore flushes the restored trees; perfect restores both work and home.
-func syncRestore(ctx context.Context, drv sandbox.Driver, baselineName, work, home string, timeout time.Duration) error {
-	if _, ok := drv.(sandbox.SnapshotSizer); ok {
-		if _, err := drv.Exec(ctx, "sync", timeout); err != nil {
-			return fmt.Errorf("restore sync: %w", err)
-		}
+// It follows the same local-only rule as syncCheckpoint.
+func syncRestore(drv sandbox.Driver, baselineName, work, home string) error {
+	if drv.Name() != "local" {
 		return nil
 	}
 	areas := []string{work}
@@ -596,7 +604,7 @@ func syncRestore(ctx context.Context, drv sandbox.Driver, baselineName, work, ho
 		areas = append(areas, home)
 	}
 	if err := syncPaths(areas); err != nil {
-		return fmt.Errorf("restore sync: %w", err)
+		return fmt.Errorf("sync: %w", err)
 	}
 	return nil
 }
@@ -671,11 +679,17 @@ func (r *Result) lastSnapshotBytes() int64 {
 	return r.DiskSnapshotBytes[len(r.DiskSnapshotBytes)-1]
 }
 
-// noteDisk samples the run root and keeps the peak allocated size.
-func (r *Result) noteDisk(drv sandbox.Driver, root string, snapshotBytes int64) {
-	sample := treeBytes(root)
-	if _, ok := drv.(sandbox.SnapshotSizer); ok {
-		sample += snapshotBytes
+// noteDisk samples the run disk and keeps the peak allocated size. The sample
+// is the work tree plus home plus the checkpoint state. For the local driver
+// the whole run root is walked: it already holds the snapshot areas. A sandbox
+// driver reports each tree itself, so the host staging copies are not mixed in.
+func (r *Result) noteDisk(ctx context.Context, drv sandbox.Driver, root, work, home string, snapshotBytes int64) {
+	var sample int64
+	if _, ok := drv.(sandbox.StorageSizer); ok {
+		sample = driverDirBytes(ctx, drv, "work", work) +
+			driverDirBytes(ctx, drv, "home", home) + snapshotBytes
+	} else {
+		sample = treeBytes(root)
 	}
 	if sample > r.PeakDiskBytes {
 		r.PeakDiskBytes = sample
@@ -879,6 +893,9 @@ func runInterruptRestore(ctx context.Context, drv sandbox.Driver, cfg Config, ro
 	start = time.Now()
 	if _, err := drv.Exec(ctx, script, cfg.Timeout); err != nil {
 		return fmt.Errorf("restore: second pass: %w", err)
+	}
+	if err := syncRestore(drv, cfg.Baseline, filepath.Join(root, "work"), filepath.Join(root, "home")); err != nil {
+		return fmt.Errorf("restore: %w", err)
 	}
 	res.RestoreMS = first + time.Since(start).Milliseconds()
 	return nil

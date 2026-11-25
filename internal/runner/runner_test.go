@@ -728,3 +728,60 @@ func TestSyncPaths(t *testing.T) {
 		t.Fatalf("syncPaths must flush a single regular file: %v", err)
 	}
 }
+
+type sizedDriver struct {
+	sandbox.Driver
+
+	work     int64
+	home     int64
+	snapshot int64
+}
+
+func (d sizedDriver) Name() string { return "sized" }
+
+func (d sizedDriver) DirBytes(_ context.Context, name string) (int64, error) {
+	switch name {
+	case "work":
+		return d.work, nil
+	case "home":
+		return d.home, nil
+	default:
+		return 0, fmt.Errorf("sized driver: unknown tree %q", name)
+	}
+}
+
+func (d sizedDriver) SnapshotBytes(_ context.Context, baseline string) (int64, error) {
+	if baseline == "none" {
+		return 0, nil
+	}
+	return d.snapshot, nil
+}
+
+func TestStorageSizerDiskMetrics(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	drv := sizedDriver{
+		Driver:   sandbox.NewLocal(),
+		work:     11 << 20,
+		home:     2 << 20,
+		snapshot: 3 << 20,
+	}
+	res, err := Run(context.Background(), Config{
+		Scenario: s,
+		Baseline: "cp-r",
+		OutDir:   t.TempDir(),
+		Driver:   drv,
+		Timeout:  60 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DiskWorkBytes != 11<<20 {
+		t.Fatalf("work disk=%d, want the sandbox tree size %d", res.DiskWorkBytes, int64(11<<20))
+	}
+	if len(res.DiskSnapshotBytes) != 1 || res.DiskSnapshotBytes[0] != 3<<20 {
+		t.Fatalf("snapshot series=%v, want the sandbox size %d", res.DiskSnapshotBytes, int64(3<<20))
+	}
+	if want := int64((11 + 2 + 3) << 20); res.PeakDiskBytes != want {
+		t.Fatalf("peak disk=%d, want work+home+snapshot=%d (host staging must not leak in)", res.PeakDiskBytes, want)
+	}
+}

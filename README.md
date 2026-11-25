@@ -65,8 +65,10 @@ make image-sandbox
 The container uses `--network none`, uid 1000, `--cap-drop ALL`, `--security-opt
 no-new-privileges`, memory and pid limits. The work, home and scratch trees are tmpfs; the work
 and scratch sizes follow `resources.disk_mb` of each scenario (work is `disk_mb + 64`, scratch is
-`disk_mb`, with 64m/256m floors); home stays at 64m. The
-evidence directory (`<out>/evidence`) is the only host bind. Before the first damage step a
+`disk_mb`, with 64m/256m floors); home stays at 64m. The container memory limit is
+`max(-memory, resources.memory_mb)`, so a scenario can raise it: tmpfs pages count against the
+container memory limit, and a large fixture plus its checkpoint needs more than the 512m default.
+The evidence directory (`<out>/evidence`) is the only host bind. Before the first damage step a
 pre-flight guard verifies the uid, `$HOME`, the `/.dockerenv` marker and every mount in
 `/proc/self/mountinfo`; a disk-backed mount outside `/sandbox/evidence` (and the docker
 `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` files) refuses the run with `GUARD_FAILED`.
@@ -122,11 +124,12 @@ degradation and space leaks. The report gains a `Cost` section and JSON gains
 - Tool-call latency: p50/p95 of the per-call duration over the repeats, in microseconds, with
   the `none` baseline as the reference (no checkpoint, no rollback).
 - Checkpoint cost: p50/p95 over the checkpoint series, plus the number of checkpoints.
-- Restore time, work-tree allocated bytes, snapshot allocated bytes and peak disk over the run
-  root (work + home + snapshot).
-- Checkpoint and restore durations include an fsync of the snapshot area and of the restored
-  trees: a rollback is not complete until its data is durable, and a durable measurement keeps
-  consecutive runs independent of leftover writeback.
+- Restore time, work-tree allocated bytes, snapshot allocated bytes and peak disk (work + home
+  + snapshot); with the docker driver the sizes are read inside the container.
+- For the local driver, checkpoint and restore durations include an fsync of the snapshot area
+  and of the restored trees: a rollback is not complete until its data is durable, and a durable
+  measurement keeps consecutive runs independent of leftover writeback. Container storage is
+  tmpfs, so it has no writeback to wait for and the sandbox driver skips the flush.
 - Numbers are reproducible within 10% across five runs on one machine; every checkpoint reuses
   one storage slot, so a growing snapshot size in S20 is a space leak.
 
