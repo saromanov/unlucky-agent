@@ -94,6 +94,7 @@ type DamageStep struct {
 	Barrier  string         `yaml:"barrier"`
 	Parallel [][]DamageStep `yaml:"parallel"`
 	TimeoutS int            `yaml:"timeout_s"`
+	Repeat   int            `yaml:"repeat"`
 }
 
 // Kind returns the step kind. Exactly one field must be set.
@@ -146,9 +147,10 @@ type Scenario struct {
 
 // Checkpoint defines the restore point requirements.
 type Checkpoint struct {
-	When string       `yaml:"when"`
-	Note string       `yaml:"note"`
-	Pre  []DamageStep `yaml:"pre"`
+	When   string       `yaml:"when"`
+	Note   string       `yaml:"note"`
+	Pre    []DamageStep `yaml:"pre"`
+	Repeat int          `yaml:"repeat"`
 }
 
 // Restore is the rollback mode.
@@ -254,6 +256,9 @@ func (s *Scenario) Validate() error {
 			errs = append(errs, fmt.Sprintf("damage[%d]: %v", i, err))
 		}
 	}
+	if s.Checkpoint.Repeat < 0 {
+		errs = append(errs, "checkpoint.repeat must be >= 1")
+	}
 	for i, step := range s.Checkpoint.Pre {
 		kind, err := step.Kind()
 		if err != nil {
@@ -293,6 +298,9 @@ func validateStep(step DamageStep) error {
 	if err != nil {
 		return err
 	}
+	if step.Repeat < 0 {
+		return fmt.Errorf("repeat must be >= 1")
+	}
 	if kind == StepBarrier {
 		if _, _, err := ParseBarrier(step.Barrier); err != nil {
 			return err
@@ -311,6 +319,9 @@ func validateStep(step DamageStep) error {
 			}
 			if _, err := nested.Kind(); err != nil {
 				return fmt.Errorf("parallel branch %d step %d: %w", j, k, err)
+			}
+			if nested.Repeat < 0 {
+				return fmt.Errorf("parallel branch %d step %d: repeat must be >= 1", j, k)
 			}
 			if nested.Barrier != "" {
 				if _, _, err := ParseBarrier(nested.Barrier); err != nil {

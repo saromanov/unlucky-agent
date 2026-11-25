@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -403,6 +404,27 @@ func perfectRestoreScript(preserve []string) (string, error) {
 // shellQuote single-quotes a path for the container shell.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// SnapshotBytes implements SnapshotSizer: it reports the allocated size of the
+// scratch tree that holds the checkpoint archives.
+func (d *Docker) SnapshotBytes(ctx context.Context, baseline string) (int64, error) {
+	if baseline == "none" {
+		return 0, nil
+	}
+	out, err := d.Exec(ctx, "du -sk "+containerScratch, 30*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("docker snapshot bytes: %w", err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("docker snapshot bytes: empty du output %q", out)
+	}
+	kib, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("docker snapshot bytes: parse %q: %w", fields[0], err)
+	}
+	return kib * 1024, nil
 }
 
 // Close removes the container.

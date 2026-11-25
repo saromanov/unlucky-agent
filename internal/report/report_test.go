@@ -43,3 +43,55 @@ func TestRecoveryPathsSectionOmitted(t *testing.T) {
 		t.Fatalf("a clean report must not render the section:\n%s", out)
 	}
 }
+
+func TestCostSection(t *testing.T) {
+	out := renderMarkdown(t, []runner.Result{{
+		ScenarioID:        "S19",
+		Verdict:           runner.VerdictPass,
+		RestoreMS:         1234,
+		CheckpointTimesMS: []int64{10, 20, 30, 40, 50},
+		DiskSnapshotBytes: []int64{1 << 20, 2 << 20},
+		DiskWorkBytes:     1 << 30,
+		PeakDiskBytes:     2 << 30,
+		Steps: []runner.StepTiming{
+			{Index: 0, Kind: "toolcall", MS: 7},
+			{Index: 0, Kind: "toolcall", MS: 9},
+			{Index: 1, Kind: "shell", MS: 100},
+		},
+	}})
+	if !strings.Contains(out, "## Cost") {
+		t.Fatalf("the cost section must be rendered:\n%s", out)
+	}
+	if !strings.Contains(out, "| S19 | 5 | 30 | 50 | 1234 | 2 | 7 | 9 | 1.00 GiB | 2.00 MiB | 2.00 GiB |") {
+		t.Fatalf("the cost row must carry the series:\n%s", out)
+	}
+	if strings.Index(out, "## Cost") > strings.Index(out, "## Summary") {
+		t.Fatalf("the cost section must precede the summary:\n%s", out)
+	}
+}
+
+func TestCostSectionOmitted(t *testing.T) {
+	out := renderMarkdown(t, []runner.Result{{
+		ScenarioID: "S02",
+		Verdict:    runner.VerdictPass,
+		RestoreMS:  10,
+	}})
+	if strings.Contains(out, "## Cost") {
+		t.Fatalf("a scenario without cost data must not render the section:\n%s", out)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	cases := map[int64]string{
+		0:           "0 B",
+		512:         "512 B",
+		1536:        "1.50 KiB",
+		1 << 20:     "1.00 MiB",
+		3 << 30 / 2: "1.50 GiB",
+	}
+	for in, want := range cases {
+		if got := humanBytes(in); got != want {
+			t.Fatalf("humanBytes(%d)=%q, want %q", in, got, want)
+		}
+	}
+}

@@ -94,18 +94,46 @@ Every entry states what still can be recovered and how.
 
 {{range .RecoveryPaths}}- {{.}}
 {{end}}
+{{end}}{{if .Cost}}## Cost
+
+Checkpoint and tool-call percentiles cover the repeated calls of the run; the
+none baseline is the added-latency reference. Disk figures are allocated bytes.
+
+| Scenario | Checkpoints | Checkpoint p50 ms | Checkpoint p95 ms | Restore ms | Tool calls | Tool p50 ms | Tool p95 ms | Work disk | Snapshot disk | Peak disk |
+|---|---|---|---|---|---|---|---|---|---|---|
+{{range .Cost}}| {{.ScenarioID}} | {{.Checkpoints}} | {{.CheckpointP50}} | {{.CheckpointP95}} | {{.RestoreMS}} | {{.ToolCalls}} | {{.ToolP50}} | {{.ToolP95}} | {{bytes .DiskWork}} | {{bytes .DiskSnapshot}} | {{bytes .PeakDisk}} |
+{{end}}
 {{end}}## Summary
 
 {{.Summary}}
 `
 
-var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{"note": firstSentence}).Parse(markdownTmpl))
+var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{
+	"note":  firstSentence,
+	"bytes": humanBytes,
+}).Parse(markdownTmpl))
 
 type mdData struct {
 	*Report
 	Summary       string
 	MetaDefects   []string
 	RecoveryPaths []string
+	Cost          []CostRow
+}
+
+// CostRow is one line of the cost section.
+type CostRow struct {
+	ScenarioID    string
+	Checkpoints   int
+	CheckpointP50 int64
+	CheckpointP95 int64
+	RestoreMS     int64
+	ToolCalls     int
+	ToolP50       int64
+	ToolP95       int64
+	DiskWork      int64
+	DiskSnapshot  int64
+	PeakDisk      int64
 }
 
 // WriteMarkdown writes a human-readable report.
@@ -115,8 +143,71 @@ func WriteMarkdown(w io.Writer, r *Report) error {
 		Summary:       summarize(r),
 		MetaDefects:   metaDefects(r),
 		RecoveryPaths: recoveryPaths(r),
+		Cost:          costRows(r),
 	}
 	return mdTemplate.Execute(w, data)
+}
+
+// costRows renders the timing series of a run, one row per scenario that has
+// cost data. Results are already sorted by scenario id.
+func costRows(r *Report) []CostRow {
+	var out []CostRow
+	for _, res := range r.Results {
+		tool := toolCallTimes(res.Steps)
+		if len(res.CheckpointTimesMS) == 0 && len(tool) == 0 {
+			continue
+		}
+		out = append(out, CostRow{
+			ScenarioID:    res.ScenarioID,
+			Checkpoints:   len(res.CheckpointTimesMS),
+			CheckpointP50: runner.Percentile(res.CheckpointTimesMS, 50),
+			CheckpointP95: runner.Percentile(res.CheckpointTimesMS, 95),
+			RestoreMS:     res.RestoreMS,
+			ToolCalls:     len(tool),
+			ToolP50:       runner.Percentile(tool, 50),
+			ToolP95:       runner.Percentile(tool, 95),
+			DiskWork:      res.DiskWorkBytes,
+			DiskSnapshot:  maxSnapshot(res.DiskSnapshotBytes),
+			PeakDisk:      res.PeakDiskBytes,
+		})
+	}
+	return out
+}
+
+func toolCallTimes(steps []runner.StepTiming) []int64 {
+	var out []int64
+	for _, s := range steps {
+		if s.Kind == "toolcall" {
+			out = append(out, s.MS)
+		}
+	}
+	return out
+}
+
+func maxSnapshot(values []int64) int64 {
+	var maxValue int64
+	for _, v := range values {
+		if v > maxValue {
+			maxValue = v
+		}
+	}
+	return maxValue
+}
+
+// humanBytes formats an allocated byte count with binary units.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	value := float64(n)
+	idx := -1
+	for value >= unit && idx < len(units)-1 {
+		value /= unit
+		idx++
+	}
+	return fmt.Sprintf("%.2f %s", value, units[idx])
 }
 
 // firstSentence shortens a note to its first clause for the matrix cell.

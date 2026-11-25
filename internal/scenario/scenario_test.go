@@ -234,3 +234,39 @@ func TestParseBarrier(t *testing.T) {
 		t.Fatal("a barrier without a name must be rejected")
 	}
 }
+
+func TestValidateRepeat(t *testing.T) {
+	ok := baseScenario(DamageStep{Shell: "echo {{i}}", Repeat: 3})
+	ok.Checkpoint.Repeat = 200
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("positive repeats must pass: %v", err)
+	}
+
+	bad := baseScenario(DamageStep{Shell: "true", Repeat: -1})
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "repeat must be >= 1") {
+		t.Fatalf("a negative step repeat must be rejected, got: %v", err)
+	}
+
+	badCP := baseScenario(DamageStep{Shell: "true"})
+	badCP.Checkpoint.Repeat = -1
+	if err := badCP.Validate(); err == nil || !strings.Contains(err.Error(), "checkpoint.repeat") {
+		t.Fatalf("a negative checkpoint repeat must be rejected, got: %v", err)
+	}
+
+	nested := baseScenario(DamageStep{Parallel: [][]DamageStep{{{Shell: "true", Repeat: -2}}}})
+	if err := nested.Validate(); err == nil {
+		t.Fatal("a negative repeat in a parallel branch must be rejected")
+	}
+}
+
+func TestLoadCostScenarios(t *testing.T) {
+	for _, id := range []string{"S19", "S20"} {
+		s, err := Load(filepath.Join("..", "..", "scenarios", id+".yaml"))
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		if s.Group != "cost" || s.Fixture != "big_tree" {
+			t.Fatalf("%s: group=%q fixture=%q", id, s.Group, s.Fixture)
+		}
+	}
+}

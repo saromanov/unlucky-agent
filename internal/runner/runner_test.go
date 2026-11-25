@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saromanov/unlucky-agent/internal/manifest"
 	"github.com/saromanov/unlucky-agent/internal/oracle"
 	"github.com/saromanov/unlucky-agent/internal/sandbox"
 	"github.com/saromanov/unlucky-agent/internal/scenario"
@@ -578,5 +580,128 @@ func TestExecInterrupt(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "done") {
 		t.Fatalf("output is lost: %q", out)
+	}
+}
+
+func TestRepeatExpandsIterationPlaceholder(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{
+		{Shell: "printf 'run %s\n' {{i}} > rep-{{i}}.txt", Repeat: 3},
+		{
+			ToolCall: &scenario.ToolCall{
+				Name: "append_line",
+				Args: map[string]string{"cmd": "printf 'call %s\n' {{i}} >> tool-{{i}}.txt"},
+			},
+			Repeat: 2,
+		},
+		{Shell: "rm -rf docs"},
+	}, []string{"work/docs/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+
+	counts := map[string]int{}
+	for _, step := range res.Steps {
+		counts[step.Kind]++
+		if step.Index < 0 || step.Index > 2 {
+			t.Fatalf("step index %d is out of range", step.Index)
+		}
+	}
+	if counts[string(scenario.StepShell)] != 4 {
+		t.Fatalf("shell timings=%d, want 4: %+v", counts[string(scenario.StepShell)], res.Steps)
+	}
+	if counts[string(scenario.StepToolCall)] != 2 {
+		t.Fatalf("toolcall timings=%d, want 2: %+v", counts[string(scenario.StepToolCall)], res.Steps)
+	}
+
+	paths := manifestPaths(t, res.Artifacts["damaged"])
+	for _, want := range []string{
+		"work/rep-0.txt", "work/rep-1.txt", "work/rep-2.txt",
+		"work/tool-0.txt", "work/tool-1.txt",
+	} {
+		if !paths[want] {
+			t.Fatalf("%s is missing from the damaged manifest", want)
+		}
+	}
+	if paths["work/rep-{{i}}.txt"] || paths["work/tool-{{i}}.txt"] {
+		t.Fatal("the placeholder must be expanded before execution")
+	}
+}
+
+func manifestPaths(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, line := range lines[1:] {
+		var entry manifest.Entry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Path != "" {
+			out[entry.Path] = true
+		}
+	}
+	return out
+}
+
+func TestCheckpointRepeatSeries(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	s.Checkpoint.Repeat = 3
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if len(res.CheckpointTimesMS) != 3 {
+		t.Fatalf("checkpoint series=%v, want 3 values", res.CheckpointTimesMS)
+	}
+	if len(res.DiskSnapshotBytes) != 3 {
+		t.Fatalf("snapshot series=%v, want 3 values", res.DiskSnapshotBytes)
+	}
+	for _, v := range res.DiskSnapshotBytes {
+		if v <= 0 {
+			t.Fatalf("a checkpoint must occupy disk: %v", res.DiskSnapshotBytes)
+		}
+	}
+	if res.DiskWorkBytes <= 0 {
+		t.Fatalf("work disk=%d, want > 0", res.DiskWorkBytes)
+	}
+	if res.PeakDiskBytes < res.DiskWorkBytes {
+		t.Fatalf("peak disk=%d is below the work tree=%d", res.PeakDiskBytes, res.DiskWorkBytes)
+	}
+}
+
+func TestCheckpointRepeatKeepsOneSlot(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	s.Checkpoint.Repeat = 3
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	first, last := res.DiskSnapshotBytes[0], res.DiskSnapshotBytes[len(res.DiskSnapshotBytes)-1]
+	if last > first+first/10 {
+		t.Fatalf("the snapshot slot grows across checkpoints: %v", res.DiskSnapshotBytes)
+	}
+}
+
+func TestPercentile(t *testing.T) {
+	if got := Percentile(nil, 50); got != 0 {
+		t.Fatalf("an empty series must be 0, got %d", got)
+	}
+	values := []int64{50, 10, 40, 20, 30}
+	if got := Percentile(values, 50); got != 30 {
+		t.Fatalf("p50=%d, want 30", got)
+	}
+	if got := Percentile(values, 95); got != 50 {
+		t.Fatalf("p95=%d, want 50", got)
+	}
+	if got := Percentile(values, 100); got != 50 {
+		t.Fatalf("p100=%d, want 50", got)
+	}
+	if values[0] != 50 {
+		t.Fatal("Percentile must not reorder the input")
 	}
 }

@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/baseline"
@@ -57,24 +60,54 @@ type Config struct {
 
 // Result is the outcome of a single run.
 type Result struct {
-	ScenarioID     string            `json:"scenario_id"`
-	Title          string            `json:"title"`
-	Baseline       string            `json:"baseline"`
-	RestoreCmd     string            `json:"restore_cmd,omitempty"`
-	Verdict        string            `json:"verdict"`
-	Reason         string            `json:"reason,omitempty"`
-	RecoveryPath   string            `json:"recovery_path,omitempty"`
-	Sandbox        string            `json:"sandbox,omitempty"`
-	DamageDetected bool              `json:"damage_detected"`
-	Recall         float64           `json:"recall"`
-	MetaScore      float64           `json:"meta_score"`
-	Clobbered      int               `json:"clobbered"`
-	Diff           *oracle.Result    `json:"diff,omitempty"`
-	DamageMS       int64             `json:"damage_ms"`
-	RestoreMS      int64             `json:"restore_ms"`
-	Root           string            `json:"root,omitempty"`
-	Artifacts      map[string]string `json:"artifacts,omitempty"`
-	Notes          string            `json:"notes,omitempty"`
+	ScenarioID        string            `json:"scenario_id"`
+	Title             string            `json:"title"`
+	Baseline          string            `json:"baseline"`
+	RestoreCmd        string            `json:"restore_cmd,omitempty"`
+	Verdict           string            `json:"verdict"`
+	Reason            string            `json:"reason,omitempty"`
+	RecoveryPath      string            `json:"recovery_path,omitempty"`
+	Sandbox           string            `json:"sandbox,omitempty"`
+	DamageDetected    bool              `json:"damage_detected"`
+	Recall            float64           `json:"recall"`
+	MetaScore         float64           `json:"meta_score"`
+	Clobbered         int               `json:"clobbered"`
+	Diff              *oracle.Result    `json:"diff,omitempty"`
+	DamageMS          int64             `json:"damage_ms"`
+	RestoreMS         int64             `json:"restore_ms"`
+	CheckpointTimesMS []int64           `json:"checkpoint_times_ms,omitempty"`
+	DiskSnapshotBytes []int64           `json:"disk_snapshot_bytes,omitempty"`
+	DiskWorkBytes     int64             `json:"disk_work_bytes,omitempty"`
+	PeakDiskBytes     int64             `json:"peak_disk_bytes,omitempty"`
+	Steps             []StepTiming      `json:"steps,omitempty"`
+	Root              string            `json:"root,omitempty"`
+	Artifacts         map[string]string `json:"artifacts,omitempty"`
+	Notes             string            `json:"notes,omitempty"`
+}
+
+// StepTiming is the wall-clock duration of one damage step execution.
+type StepTiming struct {
+	Index int    `json:"index"`
+	Kind  string `json:"kind"`
+	MS    int64  `json:"ms"`
+}
+
+// Percentile returns the nearest-rank percentile of values, p in [0, 100].
+// It returns 0 for an empty slice.
+func Percentile(values []int64, p int) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]int64(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	rank := (p*len(sorted) + 99) / 100
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
 }
 
 // Run executes a scenario in a temporary directory.
@@ -203,59 +236,56 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	cpBase, hasCP := drv.(sandbox.CPBaseline)
 	perfectBase, hasPerfect := drv.(sandbox.PerfectBaseline)
-	var snap string
-	if cfg.Baseline == "cp-r" {
-		if hasCP {
-			if err := cpBase.CPSnapshot(ctx, cfg.Timeout); err != nil {
-				res.Verdict = VerdictError
-				res.Reason = "checkpoint: " + err.Error()
-				res.RecoveryPath = checkpointRecoveryPath
-				return res, nil
-			}
-		} else {
-			snap = filepath.Join(root, "snapshot")
-			if err := baseline.Snapshot(work, snap); err != nil {
-				res.Verdict = VerdictError
-				res.Reason = "checkpoint: " + err.Error()
-				res.RecoveryPath = checkpointRecoveryPath
-				return res, nil
-			}
-		}
-	}
+	snap := filepath.Join(root, "snapshot")
 	snapWork := filepath.Join(root, "snapshot-work")
 	snapHome := filepath.Join(root, "snapshot-home")
-	if cfg.Baseline == "perfect" {
-		if hasPerfect {
-			if err := perfectBase.PerfectSnapshot(ctx, cfg.Timeout); err != nil {
+	tarSnap := filepath.Join(root, "snapshot.tar")
+
+	checkpoint := func() error {
+		switch cfg.Baseline {
+		case "cp-r":
+			if hasCP {
+				return cpBase.CPSnapshot(ctx, cfg.Timeout)
+			}
+			return baseline.Snapshot(work, snap)
+		case "perfect":
+			if hasPerfect {
+				return perfectBase.PerfectSnapshot(ctx, cfg.Timeout)
+			}
+			return baseline.PerfectSnapshot(work, home, snapWork, snapHome)
+		case "tar":
+			return baseline.TarSnapshot(work, tarSnap)
+		default:
+			return nil
+		}
+	}
+
+	res.DiskWorkBytes = treeBytes(work)
+	res.noteDisk(drv, root, 0)
+	if cfg.Baseline != "none" {
+		for range checkpointRepeat(cfg.Scenario) {
+			start := time.Now()
+			if err := checkpoint(); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "checkpoint: " + err.Error()
 				res.RecoveryPath = checkpointRecoveryPath
 				return res, nil
 			}
-		} else if err := baseline.PerfectSnapshot(work, home, snapWork, snapHome); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "checkpoint: " + err.Error()
-			res.RecoveryPath = checkpointRecoveryPath
-			return res, nil
-		}
-	}
-	tarSnap := filepath.Join(root, "snapshot.tar")
-	if cfg.Baseline == "tar" {
-		if err := baseline.TarSnapshot(work, tarSnap); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "checkpoint: " + err.Error()
-			res.RecoveryPath = checkpointRecoveryPath
-			return res, nil
+			res.CheckpointTimesMS = append(res.CheckpointTimesMS, time.Since(start).Milliseconds())
+			snapshotBytes := snapshotStorageBytes(ctx, drv, cfg.Baseline, root)
+			res.DiskSnapshotBytes = append(res.DiskSnapshotBytes, snapshotBytes)
+			res.noteDisk(drv, root, snapshotBytes)
 		}
 	}
 
 	start := time.Now()
-	if err := runDamage(ctx, drv, cfg.Scenario, cfg.Timeout); err != nil {
+	if err := runDamage(ctx, drv, cfg.Scenario, cfg.Timeout, res); err != nil {
 		res.Verdict = VerdictError
 		res.Reason = err.Error()
 		return res, nil
 	}
 	res.DamageMS = time.Since(start).Milliseconds()
+	res.noteDisk(drv, root, res.lastSnapshotBytes())
 
 	damagedManifest, err := capture("damaged")
 	if err != nil {
@@ -405,6 +435,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		}
 		res.RestoreMS = time.Since(restoreStart).Milliseconds()
 	}
+	res.noteDisk(drv, root, res.lastSnapshotBytes())
 
 	if cfg.Scenario.Restore.ConcurrentWrite != "" {
 		if _, err := drv.Exec(ctx, shim.SignalScript("writer-stop"), cfg.Timeout); err != nil {
@@ -467,16 +498,94 @@ func validBaseline(name string) bool {
 	return false
 }
 
+// treeBytes returns the allocated size of regular files under path, the sum of
+// st_blocks*512. A missing path counts as zero.
+func treeBytes(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			total += st.Blocks * 512
+		}
+		return nil
+	})
+	return total
+}
+
+// snapshotStorageBytes reports the allocated size of the checkpoint state.
+func snapshotStorageBytes(ctx context.Context, drv sandbox.Driver, baselineName, root string) int64 {
+	if sizer, ok := drv.(sandbox.SnapshotSizer); ok {
+		if n, err := sizer.SnapshotBytes(ctx, baselineName); err == nil {
+			return n
+		}
+		return 0
+	}
+	switch baselineName {
+	case "cp-r":
+		return treeBytes(filepath.Join(root, "snapshot"))
+	case "perfect":
+		return treeBytes(filepath.Join(root, "snapshot-work")) + treeBytes(filepath.Join(root, "snapshot-home"))
+	case "tar":
+		return treeBytes(filepath.Join(root, "snapshot.tar"))
+	default:
+		return 0
+	}
+}
+
+// lastSnapshotBytes returns the snapshot size of the last checkpoint.
+func (r *Result) lastSnapshotBytes() int64 {
+	if len(r.DiskSnapshotBytes) == 0 {
+		return 0
+	}
+	return r.DiskSnapshotBytes[len(r.DiskSnapshotBytes)-1]
+}
+
+// noteDisk samples the run root and keeps the peak allocated size.
+func (r *Result) noteDisk(drv sandbox.Driver, root string, snapshotBytes int64) {
+	sample := treeBytes(root)
+	if _, ok := drv.(sandbox.SnapshotSizer); ok {
+		sample += snapshotBytes
+	}
+	if sample > r.PeakDiskBytes {
+		r.PeakDiskBytes = sample
+	}
+}
+
 func runPreCheckpoint(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
 	for i, step := range s.Checkpoint.Pre {
-		if err := execStep(ctx, drv, step, fmt.Sprintf("checkpoint.pre[%d]", i), stepTimeout(step, timeout)); err != nil {
+		if err := execStep(ctx, drv, step, 0, fmt.Sprintf("checkpoint.pre[%d]", i), stepTimeout(step, timeout)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
+// checkpointRepeat returns the number of checkpoints to take for a scenario.
+func checkpointRepeat(s *scenario.Scenario) int {
+	if s.Checkpoint.Repeat > 0 {
+		return s.Checkpoint.Repeat
+	}
+	return 1
+}
+
+// stepRepeat returns the execution count of a damage step.
+func stepRepeat(step scenario.DamageStep) int {
+	if step.Repeat > 0 {
+		return step.Repeat
+	}
+	return 1
+}
+
+func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration, res *Result) error {
 	for i, step := range s.Damage {
 		kind, err := step.Kind()
 		if err != nil {
@@ -484,16 +593,35 @@ func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, ti
 		}
 		prefix := fmt.Sprintf("damage[%d]", i)
 		if kind == scenario.StepParallel {
+			start := time.Now()
 			if err := runParallel(ctx, drv, i, step, timeout); err != nil {
 				return err
 			}
+			res.Steps = append(res.Steps, StepTiming{
+				Index: i,
+				Kind:  string(kind),
+				MS:    time.Since(start).Milliseconds(),
+			})
 			continue
 		}
-		if err := execStep(ctx, drv, step, prefix, stepTimeout(step, timeout)); err != nil {
-			return err
+		for iter := range stepRepeat(step) {
+			start := time.Now()
+			if err := execStep(ctx, drv, step, iter, prefix, stepTimeout(step, timeout)); err != nil {
+				return err
+			}
+			res.Steps = append(res.Steps, StepTiming{
+				Index: i,
+				Kind:  string(kind),
+				MS:    time.Since(start).Milliseconds(),
+			})
 		}
 	}
 	return nil
+}
+
+// expandIteration replaces the {{i}} placeholder with the iteration index.
+func expandIteration(script string, iter int) string {
+	return strings.ReplaceAll(script, "{{i}}", strconv.Itoa(iter))
 }
 
 // runParallel executes the branches of a parallel group concurrently.
@@ -512,7 +640,7 @@ func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario
 			defer wg.Done()
 			prefix := fmt.Sprintf("damage[%d] parallel[%d]", idx, b)
 			for _, nested := range branch {
-				if err := execStep(gctx, drv, nested, prefix, stepTimeout(nested, stepTimeout(step, timeout))); err != nil {
+				if err := execStep(gctx, drv, nested, 0, prefix, stepTimeout(nested, stepTimeout(step, timeout))); err != nil {
 					mu.Lock()
 					if werr == nil {
 						werr = err
@@ -529,22 +657,22 @@ func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario
 }
 
 // execStep runs one damage step and prefixes its errors with the journal label.
-func execStep(ctx context.Context, drv sandbox.Driver, step scenario.DamageStep, prefix string, timeout time.Duration) error {
+func execStep(ctx context.Context, drv sandbox.Driver, step scenario.DamageStep, iter int, prefix string, timeout time.Duration) error {
 	kind, err := step.Kind()
 	if err != nil {
 		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	switch kind {
 	case scenario.StepShell:
-		if _, err := drv.Exec(ctx, step.Shell, timeout); err != nil {
+		if _, err := drv.Exec(ctx, expandIteration(step.Shell, iter), timeout); err != nil {
 			return fmt.Errorf("%s: %w", prefix, err)
 		}
 	case scenario.StepPostEdit:
-		if _, err := drv.Exec(ctx, step.PostEdit, timeout); err != nil {
+		if _, err := drv.Exec(ctx, expandIteration(step.PostEdit, iter), timeout); err != nil {
 			return fmt.Errorf("%s post_edit: %w", prefix, err)
 		}
 	case scenario.StepToolCall:
-		cmd := step.ToolCall.Args["cmd"]
+		cmd := expandIteration(step.ToolCall.Args["cmd"], iter)
 		if cmd == "" {
 			return fmt.Errorf("%s: toolcall without args.cmd is not supported yet", prefix)
 		}

@@ -2,6 +2,8 @@ package fixture
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -22,7 +24,7 @@ func needGit(t *testing.T) {
 }
 
 func TestKnown(t *testing.T) {
-	for _, name := range []string{"project_git_dirty", "project_git_shadow", "large_files", "special_files", "path_edges"} {
+	for _, name := range []string{"project_git_dirty", "project_git_shadow", "large_files", "special_files", "path_edges", "big_tree"} {
 		if !Known(name) {
 			t.Fatalf("%s must be a known fixture", name)
 		}
@@ -301,4 +303,79 @@ func TestLargeFiles(t *testing.T) {
 	}
 
 	assertDeterministic(t, "large_files")
+}
+
+// bigTreeContentBytes is the total content size the fixture targets.
+const bigTreeContentBytes = (1 << 30) * 12 / 10
+
+func TestBigTreeLayout(t *testing.T) {
+	seen := make(map[string]struct{}, bigTreeFiles)
+	var total int64
+	for i := 0; i < bigTreeFiles; i++ {
+		p := bigTreePath(i)
+		dir, name := filepath.Split(p)
+		if !strings.HasPrefix(name, "f") || !strings.HasSuffix(name, ".txt") {
+			t.Fatalf("file %d name=%q", i, name)
+		}
+		if depth := len(strings.Split(strings.Trim(dir, "/"), "/")); depth != 8 {
+			t.Fatalf("file %d sits at depth %d, want 8: %s", i, depth, p)
+		}
+		if _, ok := seen[p]; ok {
+			t.Fatalf("duplicate path %q", p)
+		}
+		seen[p] = struct{}{}
+		total += bigTreeFileSize
+	}
+	if len(seen) != bigTreeFiles {
+		t.Fatalf("layout holds %d files, want %d", len(seen), bigTreeFiles)
+	}
+	if diff := total - bigTreeContentBytes; diff < -bigTreeContentBytes/100 || diff > bigTreeContentBytes/100 {
+		t.Fatalf("content size %d is not within 1%% of %d", total, bigTreeContentBytes)
+	}
+}
+
+func TestBigTree(t *testing.T) {
+	if os.Getenv("UNLUCKY_BIG_TESTS") != "1" {
+		t.Skip("set UNLUCKY_BIG_TESTS=1")
+	}
+	work := buildFixture(t, "big_tree")
+	entries := captureEntries(t, work)
+
+	var files int
+	var total int64
+	for _, e := range entries {
+		if e.Type != "file" || !strings.HasPrefix(e.Path, "work/tree/") {
+			continue
+		}
+		files++
+		total += e.Size
+		if depth := len(strings.Split(e.Path, "/")) - 2; depth != 8 {
+			t.Fatalf("%s sits at depth %d, want 8", e.Path, depth)
+		}
+	}
+	if files != bigTreeFiles {
+		t.Fatalf("fixture holds %d files, want %d", files, bigTreeFiles)
+	}
+	if diff := total - bigTreeContentBytes; diff < -bigTreeContentBytes/100 || diff > bigTreeContentBytes/100 {
+		t.Fatalf("content size %d is not within 1%% of %d", total, bigTreeContentBytes)
+	}
+
+	other := buildFixture(t, "big_tree")
+	for _, i := range []int{0, 1, 499, bigTreeFiles / 2, bigTreeFiles - 1} {
+		a := fileHash(t, filepath.Join(work, filepath.FromSlash(bigTreePath(i))))
+		b := fileHash(t, filepath.Join(other, filepath.FromSlash(bigTreePath(i))))
+		if a != b {
+			t.Fatalf("file %d differs between builds: %s vs %s", i, a, b)
+		}
+	}
+}
+
+func fileHash(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

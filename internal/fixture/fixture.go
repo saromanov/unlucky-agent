@@ -30,7 +30,7 @@ type file struct {
 func Known(name string) bool {
 	switch name {
 	case "project_basic", "project_git", "project_git_dirty", "project_git_shadow",
-		"large_files", "special_files", "path_edges":
+		"large_files", "special_files", "path_edges", "big_tree":
 		return true
 	}
 	return false
@@ -55,6 +55,8 @@ func Build(name string, seed int64, work, home string) error {
 		return buildSpecialFiles(work)
 	case "path_edges":
 		return buildPathEdges(work)
+	case "big_tree":
+		return buildBigTree(work, seed)
 	}
 
 	files := []file{
@@ -459,6 +461,99 @@ func deepDirName(level int) string {
 // writePath creates an empty deterministic regular file.
 func writePath(path string) error {
 	if err := os.WriteFile(path, []byte("deep\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		return err
+	}
+	return os.Chtimes(path, FixedMtime, FixedMtime)
+}
+
+// big_tree fixture parameters: 50,000 files of 25,600 bytes each, which is
+// 1.28e9 bytes of content in total (about 1.19 GiB).
+const (
+	bigTreeFiles    = 50000
+	bigTreeFileSize = 25600
+	bigTreeFanout   = 10
+	bigTreeLeafDirs = bigTreeFiles / bigTreeFanout
+	bigTreeBufLen   = 4096
+)
+
+// bigTreeRadix holds the branching factor of each directory level below tree.
+var bigTreeRadix = [7]int{2, 2, 2, 5, 5, 5, 5}
+
+// bigTreeDir returns the work-relative leaf directory of a leaf index. The
+// leaf index is split into seven mixed-radix digits over bigTreeRadix, most
+// significant first, so level <n> holds d<(leaf/divisor) % radix>.
+func bigTreeDir(leaf int) string {
+	div := 1
+	for _, r := range bigTreeRadix {
+		div *= r
+	}
+	parts := make([]string, 0, len(bigTreeRadix)+1)
+	parts = append(parts, "tree")
+	for _, r := range bigTreeRadix {
+		div /= r
+		parts = append(parts, fmt.Sprintf("d%d", (leaf/div)%r))
+	}
+	return strings.Join(parts, "/")
+}
+
+// bigTreePath returns the work-relative path of file index i:
+// tree/d<b>/d<b>/d<b>/d<b>/d<b>/d<b>/d<b>/f<i%10>.txt. Every file sits in a
+// directory eight components below work, so the shell can rebuild the path
+// from the index alone.
+func bigTreePath(i int) string {
+	name := fmt.Sprintf("f%d.txt", i%bigTreeFanout)
+	return bigTreeDir(i/bigTreeFanout) + "/" + name
+}
+
+// buildBigTree creates the 50,000-file tree used by the cost scenarios. The
+// content of a file is a sha256-derived block repeated to bigTreeFileSize, so
+// the tree is deterministic for a seed and the write path reuses one buffer.
+func buildBigTree(work string, seed int64) error {
+	root := filepath.Join(work, "tree")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	buf := make([]byte, bigTreeBufLen)
+	for leaf := 0; leaf < bigTreeLeafDirs; leaf++ {
+		dir := filepath.Join(work, filepath.FromSlash(bigTreeDir(leaf)))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		for k := 0; k < bigTreeFanout; k++ {
+			full := filepath.Join(dir, fmt.Sprintf("f%d.txt", k))
+			if err := writeBigTreeFile(full, seed, leaf*bigTreeFanout+k, buf); err != nil {
+				return err
+			}
+		}
+	}
+	return fixDirTimes(root)
+}
+
+// writeBigTreeFile writes one deterministic file, streaming the shared buffer.
+func writeBigTreeFile(path string, seed int64, index int, buf []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("big_tree:%d:%d", seed, index)))
+	for off := 0; off < len(buf); off += len(sum) {
+		copy(buf[off:], sum[:])
+	}
+	for written := 0; written < bigTreeFileSize; {
+		n := bigTreeFileSize - written
+		if n > len(buf) {
+			n = len(buf)
+		}
+		if _, err := f.Write(buf[:n]); err != nil {
+			_ = f.Close()
+			return err
+		}
+		written += n
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	if err := os.Chmod(path, 0o644); err != nil {

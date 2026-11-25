@@ -1,0 +1,38 @@
+id: S19
+title: "Стоимость на репозитории 50k файлов: задержка каждого вызова агента"
+group: cost
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: big_tree
+seed: 42
+
+checkpoint:
+  when: before_damage
+  note: "work/tree: 50 000 файлов, ~1.2 GiB, каталог на восемь уровней ниже work; чекпойнт снимается до повреждения, затем замеряются p50/p95 добавочной задержки на 100 вызовах инструмента агента, время чекпойнта и отката, дельта и пик диска; базовая линия none даёт задержку без отката"
+
+damage:
+  - toolcall:
+      name: append_line
+      args:
+        cmd: |
+          i={{i}}; L=$((i / 10)); k=$((i % 10))
+          p="tree/d$(((L / 2500) % 2))/d$(((L / 1250) % 2))/d$(((L / 625) % 2))/d$(((L / 125) % 5))/d$(((L / 25) % 5))/d$(((L / 5) % 5))/d$((L % 5))/f$k.txt"
+          printf 'agent call %s\n' "$i" >> "$p"
+    repeat: 100
+  - shell: "rm -rf tree/d1"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/tree/**"]
+  preserve: []
+  require: ""
+
+limits:
+  timeout_s: 900
+
+resources:
+  disk_mb: 1600
+  memory_mb: 512

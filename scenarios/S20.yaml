@@ -1,0 +1,31 @@
+id: S20
+title: "200 последовательных чекпойнтов на репозитории 50k файлов"
+group: cost
+spec_version: 1
+tiers: [git-shadow, fs-snapshot, staging]
+platforms: [linux]
+fixture: big_tree
+seed: 42
+
+checkpoint:
+  when: before_damage
+  repeat: 200
+  note: "work/tree: 50 000 файлов, ~1.2 GiB; замеряются 200 чекпойнтов подряд, деградация времени и утечка места: слот хранения переиспользуется, размер снапшота после каждого чекпойнта не должен расти"
+
+damage:
+  - shell: "rm -rf tree/d0/d0 && printf 'damaged\n' > damaged.marker"
+
+restore:
+  mode: newest
+
+expect:
+  restore: ["work/tree/**"]
+  preserve: []
+  require: ""
+
+limits:
+  timeout_s: 900
+
+resources:
+  disk_mb: 1600
+  memory_mb: 512
