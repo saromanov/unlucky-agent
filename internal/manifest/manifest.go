@@ -2,10 +2,8 @@
 package manifest
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -96,10 +93,6 @@ func Capture(roots []Root, w io.Writer) (Stats, error) {
 		names = append(names, r.Name)
 	}
 
-	bw := bufio.NewWriterSize(w, 1<<20)
-	enc := json.NewEncoder(bw)
-	enc.SetEscapeHTML(false)
-
 	hdr := Header{
 		Manifest: 1,
 		Schema:   Schema,
@@ -108,13 +101,11 @@ func Capture(roots []Root, w io.Writer) (Stats, error) {
 		Hash:     HashAlgorithm,
 		Xattr:    xattrOK,
 	}
-	if err := enc.Encode(hdr); err != nil {
-		return Stats{}, err
-	}
 
 	var stats Stats
 	stats.Xattr = xattrOK
-	var entries []Entry
+	sorter := newEntrySorter(SortChunkEntries)
+	defer sorter.cleanup()
 
 	for _, r := range absRoots {
 		abs := r.Dir
@@ -133,7 +124,11 @@ func Capture(roots []Root, w io.Writer) (Stats, error) {
 			if err != nil {
 				return err
 			}
-			entries = append(entries, e)
+			if err := sorter.add(e); err != nil {
+				return err
+			}
+			stats.Entries++
+			stats.Bytes += e.Size
 			return nil
 		})
 		if err != nil {
@@ -141,16 +136,7 @@ func Capture(roots []Root, w io.Writer) (Stats, error) {
 		}
 	}
 
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-
-	for _, e := range entries {
-		if err := enc.Encode(e); err != nil {
-			return Stats{}, err
-		}
-		stats.Entries++
-		stats.Bytes += e.Size
-	}
-	if err := bw.Flush(); err != nil {
+	if err := sorter.write(w, hdr); err != nil {
 		return Stats{}, err
 	}
 	return stats, nil
