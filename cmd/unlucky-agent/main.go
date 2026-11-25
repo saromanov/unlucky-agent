@@ -196,7 +196,7 @@ func cmdRun(args []string) error {
 	dir := fs.String("dir", "scenarios", "scenario directory for -all")
 	sandboxMode := fs.String("sandbox", "local", "sandbox driver: local or docker")
 	image := fs.String("image", sandbox.DefaultImage, "sandbox image (docker driver)")
-	memory := fs.Int("memory", sandbox.DefaultMemoryMB, "sandbox memory limit in MB (docker driver)")
+	memory := fs.Int("memory", sandbox.DefaultMemoryMB, "sandbox memory floor in MB (docker driver, scenarios may raise it)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -267,11 +267,13 @@ func cmdRun(args []string) error {
 			}
 			if dockerMode {
 				// The tmpfs sizes follow the scenario resources: a fixture must
-				// fit in work, and scratch must hold its snapshot archive.
+				// fit in work, and scratch must hold its snapshot archive. The
+				// tmpfs pages count against the container memory limit, so a
+				// scenario may raise it above the -memory floor.
 				drv, err := sandbox.NewDocker(sandbox.DockerConfig{
 					Image:         *image,
 					EvidenceDir:   filepath.Join(*outDir, "evidence"),
-					MemoryMB:      *memory,
+					MemoryMB:      max(*memory, s.Resources.MemoryMB),
 					WorkSizeMB:    max(sandbox.DefaultWorkSizeMB, s.Resources.DiskMB+64),
 					ScratchSizeMB: max(sandbox.DefaultScratchSizeMB, s.Resources.DiskMB),
 				})

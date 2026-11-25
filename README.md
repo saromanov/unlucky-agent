@@ -19,7 +19,8 @@ guard and a host canary. Scenarios cover git shadowing of untracked files (S01-S
 the project (S05), large and sparse files (S06), special files with hardlinks, setuid, fifos and
 sockets (S07), path-name edge cases (S09), concurrent sessions, torn state, an interrupted
 restore and a restore overlapping a live writer (S13, S14, S15, S18), a corrupted `.git` and
-shadow repository (S16) and a checkpoint under ~95% disk pressure (S17), and rollback safety (S21).
+shadow repository (S16), a checkpoint under ~95% disk pressure (S17), rollback safety (S21) and
+the cost of rollback on a 50k-file repository (S19, S20).
 The adapter protocol is next.
 
 Working name: the repository name may change before the first public release.
@@ -64,11 +65,17 @@ make image-sandbox
 The container uses `--network none`, uid 1000, `--cap-drop ALL`, `--security-opt
 no-new-privileges`, memory and pid limits. The work, home and scratch trees are tmpfs; the work
 and scratch sizes follow `resources.disk_mb` of each scenario (work is `disk_mb + 64`, scratch is
-`disk_mb`, with 64m/256m floors); home stays at 64m. The
-evidence directory (`<out>/evidence`) is the only host bind. Before the first damage step a
+`disk_mb`, with 64m/256m floors); home stays at 64m. The container memory limit is
+`max(-memory, resources.memory_mb)`, so a scenario can raise it: tmpfs pages count against the
+container memory limit, and a large fixture plus its checkpoint needs more than the 512m default.
+The evidence directory (`<out>/evidence`) is the only host bind. Before the first damage step a
 pre-flight guard verifies the uid, `$HOME`, the `/.dockerenv` marker and every mount in
 `/proc/self/mountinfo`; a disk-backed mount outside `/sandbox/evidence` (and the docker
 `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf` files) refuses the run with `GUARD_FAILED`.
+
+A custom image must provide `sh`, `find`, `tar` and `du`. `du` feeds the cost metrics
+(`disk_work_bytes`, `disk_snapshot_bytes`, `peak_disk_bytes`); when it is missing the run fails
+with a `disk measurement` error instead of reporting zeros.
 
 A host canary writes marker files into the temp directory, the output directory and `$HOME` and
 re-hashes them after the run. Any change or removal fails the run with `CANARY_FAILED`, even when
@@ -86,6 +93,15 @@ all scenarios passed.
   through an agent tool), plus `post_edit` for edits made after the checkpoint and `barrier`
   steps (`signal`, `wait`, `wait-held`, `wait-free`) for concurrent branches. A `parallel` step
   runs its branches simultaneously and joins before the damage manifest is captured.
+- `repeat: N` on a damage step executes it N times and times every execution into `steps` in
+  microseconds (`us`); the `{{i}}` placeholder is replaced with the 0-based iteration index in
+  the `shell`, `post_edit` and `toolcall` command text. `repeat: N` on the checkpoint takes N
+  checkpoints into the same storage slot and records `checkpoint_times_us` and
+  `disk_snapshot_bytes` per checkpoint.
+- `checkpoint.pre` steps run before the checkpoint is taken (used by S17 to fill the disk to
+  ~95% of the work tmpfs in the docker sandbox; a bounded fill on the local driver). The local
+  run additionally holds the snapshot copy of the fill (~2x121 MB peak); the pressure itself
+  applies to the docker sandbox.
 - The oracle compares three levels: content, metadata, strict metadata. Only content and
   metadata are hard gates. `post_edit` paths are checked for clobbering.
 - Metadata covers mode (including setuid/setgid), ownership, xattrs, hardlink counts of files
@@ -101,6 +117,26 @@ Supported baselines: `none` (no rollback), `cp-r` (whole-tree copy), `tar` (GNU 
 and home at the checkpoint, restores byte-for-byte, and preserves post-T edits, so it must pass
 every scenario, while `none` must fail every scenario.
 
+## Cost
+
+The `cost` group measures what rollback costs on a 50k-file, ~1.2 GiB repository (`big_tree`
+fixture; every file at directory depth 8). S19 measures the added latency per agent tool call
+over 100 calls and the checkpoint/restore path; S20 measures 200 consecutive checkpoints for
+degradation and space leaks. The report gains a `Cost` section and JSON gains
+`checkpoint_times_us`, `disk_snapshot_bytes`, `disk_work_bytes`, `peak_disk_bytes` and `steps`.
+
+- Tool-call latency: p50/p95 of the per-call duration over the repeats, in microseconds, with
+  the `none` baseline as the reference (no checkpoint, no rollback).
+- Checkpoint cost: p50/p95 over the checkpoint series, plus the number of checkpoints.
+- Restore time, work-tree allocated bytes, snapshot allocated bytes and peak disk (work + home
+  + snapshot); with the docker driver the sizes are read inside the container.
+- For the local driver, checkpoint and restore durations include an fsync of the snapshot area
+  and of the restored trees: a rollback is not complete until its data is durable, and a durable
+  measurement keeps consecutive runs independent of leftover writeback. Container storage is
+  tmpfs, so it has no writeback to wait for and the sandbox driver skips the flush.
+- Numbers are reproducible within 10% across five runs on one machine; every checkpoint reuses
+  one storage slot, so a growing snapshot size in S20 is a space leak.
+
 ## Layout
 
 ```
@@ -114,7 +150,7 @@ internal/runner        scenario execution
 internal/sandbox       local and docker drivers, guard, canary
 internal/shim          barrier scripts (files + flock)
 internal/report        JSON and Markdown reports
-scenarios              S01-S09, S13-S18, S21
+scenarios              S01-S09, S13-S21
 docker                 sandbox image
 docs                   design documents
 ```

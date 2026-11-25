@@ -87,6 +87,18 @@ type PerfectBaseline interface {
 	PerfectRestore(ctx context.Context, timeout time.Duration, preserve []string) error
 }
 
+// SnapshotSizer is implemented by drivers that keep the checkpoint state
+// inside their own sandbox, out of reach of host filesystem walks.
+type SnapshotSizer interface {
+	SnapshotBytes(ctx context.Context, baseline string) (int64, error)
+}
+
+// StorageSizer is implemented by drivers that keep the work and home trees
+// inside their own sandbox, out of reach of host filesystem walks.
+type StorageSizer interface {
+	DirBytes(ctx context.Context, name string) (int64, error)
+}
+
 // GuardFailure converts a list of failed checks into the run error.
 func GuardFailure(checks []string) error {
 	if len(checks) == 0 {

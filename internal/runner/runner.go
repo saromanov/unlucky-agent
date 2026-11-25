@@ -5,11 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/baseline"
@@ -36,6 +39,8 @@ const writerLock = "writer.lock"
 const (
 	checkpointRecoveryPath = "the checkpoint failed; no restore point exists; " +
 		"recovery path: fix the cause (for example, free disk space) and retake the checkpoint before editing"
+	diskMeasurementRecoveryPath = "the run state is intact; " +
+		"recovery path: use a sandbox image with coreutils du installed and rerun the scenario"
 	restoreRecoveryPath = "the checkpoint snapshot is intact; " +
 		"the restore can be repeated after freeing disk space"
 	externalRestoreRecoveryPath = "the restore is an external command; " +
@@ -57,24 +62,54 @@ type Config struct {
 
 // Result is the outcome of a single run.
 type Result struct {
-	ScenarioID     string            `json:"scenario_id"`
-	Title          string            `json:"title"`
-	Baseline       string            `json:"baseline"`
-	RestoreCmd     string            `json:"restore_cmd,omitempty"`
-	Verdict        string            `json:"verdict"`
-	Reason         string            `json:"reason,omitempty"`
-	RecoveryPath   string            `json:"recovery_path,omitempty"`
-	Sandbox        string            `json:"sandbox,omitempty"`
-	DamageDetected bool              `json:"damage_detected"`
-	Recall         float64           `json:"recall"`
-	MetaScore      float64           `json:"meta_score"`
-	Clobbered      int               `json:"clobbered"`
-	Diff           *oracle.Result    `json:"diff,omitempty"`
-	DamageMS       int64             `json:"damage_ms"`
-	RestoreMS      int64             `json:"restore_ms"`
-	Root           string            `json:"root,omitempty"`
-	Artifacts      map[string]string `json:"artifacts,omitempty"`
-	Notes          string            `json:"notes,omitempty"`
+	ScenarioID        string            `json:"scenario_id"`
+	Title             string            `json:"title"`
+	Baseline          string            `json:"baseline"`
+	RestoreCmd        string            `json:"restore_cmd,omitempty"`
+	Verdict           string            `json:"verdict"`
+	Reason            string            `json:"reason,omitempty"`
+	RecoveryPath      string            `json:"recovery_path,omitempty"`
+	Sandbox           string            `json:"sandbox,omitempty"`
+	DamageDetected    bool              `json:"damage_detected"`
+	Recall            float64           `json:"recall"`
+	MetaScore         float64           `json:"meta_score"`
+	Clobbered         int               `json:"clobbered"`
+	Diff              *oracle.Result    `json:"diff,omitempty"`
+	DamageMS          int64             `json:"damage_ms"`
+	RestoreMS         int64             `json:"restore_ms"`
+	CheckpointTimesUS []int64           `json:"checkpoint_times_us,omitempty"`
+	DiskSnapshotBytes []int64           `json:"disk_snapshot_bytes,omitempty"`
+	DiskWorkBytes     int64             `json:"disk_work_bytes,omitempty"`
+	PeakDiskBytes     int64             `json:"peak_disk_bytes,omitempty"`
+	Steps             []StepTiming      `json:"steps,omitempty"`
+	Root              string            `json:"root,omitempty"`
+	Artifacts         map[string]string `json:"artifacts,omitempty"`
+	Notes             string            `json:"notes,omitempty"`
+}
+
+// StepTiming is the wall-clock duration of one damage step execution.
+type StepTiming struct {
+	Index int    `json:"index"`
+	Kind  string `json:"kind"`
+	US    int64  `json:"us"`
+}
+
+// Percentile returns the nearest-rank percentile of values, p in [0, 100].
+// It returns 0 for an empty slice.
+func Percentile(values []int64, p int) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	sorted := append([]int64(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	rank := (p*len(sorted) + 99) / 100
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
 }
 
 // Run executes a scenario in a temporary directory.
@@ -203,59 +238,83 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 
 	cpBase, hasCP := drv.(sandbox.CPBaseline)
 	perfectBase, hasPerfect := drv.(sandbox.PerfectBaseline)
-	var snap string
-	if cfg.Baseline == "cp-r" {
-		if hasCP {
-			if err := cpBase.CPSnapshot(ctx, cfg.Timeout); err != nil {
-				res.Verdict = VerdictError
-				res.Reason = "checkpoint: " + err.Error()
-				res.RecoveryPath = checkpointRecoveryPath
-				return res, nil
-			}
-		} else {
-			snap = filepath.Join(root, "snapshot")
-			if err := baseline.Snapshot(work, snap); err != nil {
-				res.Verdict = VerdictError
-				res.Reason = "checkpoint: " + err.Error()
-				res.RecoveryPath = checkpointRecoveryPath
-				return res, nil
-			}
-		}
-	}
+	snap := filepath.Join(root, "snapshot")
 	snapWork := filepath.Join(root, "snapshot-work")
 	snapHome := filepath.Join(root, "snapshot-home")
-	if cfg.Baseline == "perfect" {
-		if hasPerfect {
-			if err := perfectBase.PerfectSnapshot(ctx, cfg.Timeout); err != nil {
+	tarSnap := filepath.Join(root, "snapshot.tar")
+
+	checkpoint := func() error {
+		switch cfg.Baseline {
+		case "cp-r":
+			if hasCP {
+				if err := cpBase.CPSnapshot(ctx, cfg.Timeout); err != nil {
+					return err
+				}
+			} else if err := baseline.Snapshot(work, snap); err != nil {
+				return err
+			}
+		case "perfect":
+			if hasPerfect {
+				if err := perfectBase.PerfectSnapshot(ctx, cfg.Timeout); err != nil {
+					return err
+				}
+			} else if err := baseline.PerfectSnapshot(work, home, snapWork, snapHome); err != nil {
+				return err
+			}
+		case "tar":
+			if err := baseline.TarSnapshot(work, tarSnap); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+		return syncCheckpoint(drv, cfg.Baseline, root)
+	}
+
+	diskWork, err := driverDirBytes(ctx, drv, "work", work)
+	if err != nil {
+		diskFail(res, err)
+		return res, nil
+	}
+	res.DiskWorkBytes = diskWork
+	if err := res.noteDisk(ctx, drv, root, work, home, 0); err != nil {
+		diskFail(res, err)
+		return res, nil
+	}
+	if cfg.Baseline != "none" {
+		for range checkpointRepeat(cfg.Scenario) {
+			start := time.Now()
+			if err := checkpoint(); err != nil {
 				res.Verdict = VerdictError
 				res.Reason = "checkpoint: " + err.Error()
 				res.RecoveryPath = checkpointRecoveryPath
 				return res, nil
 			}
-		} else if err := baseline.PerfectSnapshot(work, home, snapWork, snapHome); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "checkpoint: " + err.Error()
-			res.RecoveryPath = checkpointRecoveryPath
-			return res, nil
-		}
-	}
-	tarSnap := filepath.Join(root, "snapshot.tar")
-	if cfg.Baseline == "tar" {
-		if err := baseline.TarSnapshot(work, tarSnap); err != nil {
-			res.Verdict = VerdictError
-			res.Reason = "checkpoint: " + err.Error()
-			res.RecoveryPath = checkpointRecoveryPath
-			return res, nil
+			res.CheckpointTimesUS = append(res.CheckpointTimesUS, time.Since(start).Microseconds())
+			snapshotBytes, err := snapshotStorageBytes(ctx, drv, cfg.Baseline, root)
+			if err != nil {
+				diskFail(res, err)
+				return res, nil
+			}
+			res.DiskSnapshotBytes = append(res.DiskSnapshotBytes, snapshotBytes)
+			if err := res.noteDisk(ctx, drv, root, work, home, snapshotBytes); err != nil {
+				diskFail(res, err)
+				return res, nil
+			}
 		}
 	}
 
 	start := time.Now()
-	if err := runDamage(ctx, drv, cfg.Scenario, cfg.Timeout); err != nil {
+	if err := runDamage(ctx, drv, cfg.Scenario, cfg.Timeout, res); err != nil {
 		res.Verdict = VerdictError
 		res.Reason = err.Error()
 		return res, nil
 	}
 	res.DamageMS = time.Since(start).Milliseconds()
+	if err := res.noteDisk(ctx, drv, root, work, home, res.lastSnapshotBytes()); err != nil {
+		diskFail(res, err)
+		return res, nil
+	}
 
 	damagedManifest, err := capture("damaged")
 	if err != nil {
@@ -403,7 +462,19 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		default:
 			// baseline none: no rollback is performed.
 		}
+		if cfg.RestoreCmd != "" || cfg.Baseline != "none" {
+			if err := syncRestore(drv, cfg.Baseline, work, home); err != nil {
+				res.Verdict = VerdictError
+				res.Reason = "restore: " + err.Error()
+				res.RecoveryPath = restoreRecoveryPath
+				return res, nil
+			}
+		}
 		res.RestoreMS = time.Since(restoreStart).Milliseconds()
+	}
+	if err := res.noteDisk(ctx, drv, root, work, home, res.lastSnapshotBytes()); err != nil {
+		diskFail(res, err)
+		return res, nil
 	}
 
 	if cfg.Scenario.Restore.ConcurrentWrite != "" {
@@ -467,16 +538,226 @@ func validBaseline(name string) bool {
 	return false
 }
 
-func runPreCheckpoint(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
-	for i, step := range s.Checkpoint.Pre {
-		if err := execStep(ctx, drv, step, fmt.Sprintf("checkpoint.pre[%d]", i), stepTimeout(step, timeout)); err != nil {
+// treeBytes returns the allocated size of regular files under path, the sum of
+// st_blocks*512. A missing path counts as zero.
+func treeBytes(path string) int64 {
+	var total int64
+	_ = filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		if st, ok := info.Sys().(*syscall.Stat_t); ok {
+			total += st.Blocks * 512
+		}
+		return nil
+	})
+	return total
+}
+
+// snapshotAreas returns the host paths that hold the checkpoint state.
+func snapshotAreas(baselineName, root string) []string {
+	switch baselineName {
+	case "cp-r":
+		return []string{filepath.Join(root, "snapshot")}
+	case "perfect":
+		return []string{filepath.Join(root, "snapshot-work"), filepath.Join(root, "snapshot-home")}
+	case "tar":
+		return []string{filepath.Join(root, "snapshot.tar")}
+	default:
+		return nil
+	}
+}
+
+// snapshotStorageBytes reports the allocated size of the checkpoint state.
+func snapshotStorageBytes(ctx context.Context, drv sandbox.Driver, baselineName, root string) (int64, error) {
+	if sizer, ok := drv.(sandbox.SnapshotSizer); ok {
+		return sizer.SnapshotBytes(ctx, baselineName)
+	}
+	var total int64
+	for _, p := range snapshotAreas(baselineName, root) {
+		total += treeBytes(p)
+	}
+	return total, nil
+}
+
+// driverDirBytes reports the allocated size of a scenario tree: the sandbox
+// tree for a StorageSizer driver, the host staging tree otherwise.
+func driverDirBytes(ctx context.Context, drv sandbox.Driver, name, hostDir string) (int64, error) {
+	if sizer, ok := drv.(sandbox.StorageSizer); ok {
+		return sizer.DirBytes(ctx, name)
+	}
+	return treeBytes(hostDir), nil
+}
+
+// syncCheckpoint flushes the checkpoint state: the checkpoint is not complete
+// until its data is durable, and consecutive measurements must not depend on
+// leftover writeback. Only the local driver needs the flush: container storage
+// is tmpfs, which has no writeback to wait for and nothing durable to keep.
+func syncCheckpoint(drv sandbox.Driver, baselineName, root string) error {
+	if drv.Name() != "local" {
+		return nil
+	}
+	if err := syncPaths(snapshotAreas(baselineName, root)); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+	return nil
+}
+
+// syncRestore flushes the restored trees; perfect restores both work and home.
+// It follows the same local-only rule as syncCheckpoint.
+func syncRestore(drv sandbox.Driver, baselineName, work, home string) error {
+	if drv.Name() != "local" {
+		return nil
+	}
+	areas := []string{work}
+	if baselineName == "perfect" {
+		areas = append(areas, home)
+	}
+	if err := syncPaths(areas); err != nil {
+		return fmt.Errorf("sync: %w", err)
+	}
+	return nil
+}
+
+// syncPaths fsyncs every regular file and directory under paths. A missing
+// path is skipped.
+func syncPaths(paths []string) error {
+	for _, p := range paths {
+		info, err := os.Lstat(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if info.Mode().IsRegular() {
+			if err := syncFile(p); err != nil {
+				return err
+			}
+			return syncDir(filepath.Dir(p))
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if err := filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				return syncDir(q)
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			return syncFile(q)
+		}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
+func syncFile(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func syncDir(path string) error {
+	d, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+// lastSnapshotBytes returns the snapshot size of the last checkpoint.
+func (r *Result) lastSnapshotBytes() int64 {
+	if len(r.DiskSnapshotBytes) == 0 {
+		return 0
+	}
+	return r.DiskSnapshotBytes[len(r.DiskSnapshotBytes)-1]
+}
+
+// noteDisk samples the run disk and keeps the peak allocated size. The sample
+// is the work tree plus home plus the checkpoint state. For the local driver
+// the whole run root is walked: it already holds the snapshot areas. A sandbox
+// driver reports each tree itself, so the host staging copies are not mixed in.
+func (r *Result) noteDisk(ctx context.Context, drv sandbox.Driver, root, work, home string, snapshotBytes int64) error {
+	var sample int64
+	if _, ok := drv.(sandbox.StorageSizer); ok {
+		workBytes, err := driverDirBytes(ctx, drv, "work", work)
+		if err != nil {
+			return err
+		}
+		homeBytes, err := driverDirBytes(ctx, drv, "home", home)
+		if err != nil {
+			return err
+		}
+		sample = workBytes + homeBytes + snapshotBytes
+	} else {
+		sample = treeBytes(root)
+	}
+	if sample > r.PeakDiskBytes {
+		r.PeakDiskBytes = sample
+	}
+	return nil
+}
+
+// diskFail turns a failed disk measurement into an ERROR result: a sandbox
+// that cannot report its usage must not produce zeros in the cost report.
+func diskFail(res *Result, err error) {
+	res.Verdict = VerdictError
+	res.Reason = "disk measurement: " + err.Error()
+	res.RecoveryPath = diskMeasurementRecoveryPath
+}
+
+func runPreCheckpoint(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration) error {
+	for i, step := range s.Checkpoint.Pre {
+		prefix := fmt.Sprintf("checkpoint.pre[%d]", i)
+		for iter := range stepRepeat(step) {
+			if err := execStep(ctx, drv, step, iter, prefix, stepTimeout(step, timeout)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkpointRepeat returns the number of checkpoints to take for a scenario.
+func checkpointRepeat(s *scenario.Scenario) int {
+	if s.Checkpoint.Repeat > 0 {
+		return s.Checkpoint.Repeat
+	}
+	return 1
+}
+
+// stepRepeat returns the execution count of a damage step.
+func stepRepeat(step scenario.DamageStep) int {
+	if step.Repeat > 0 {
+		return step.Repeat
+	}
+	return 1
+}
+
+func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, timeout time.Duration, res *Result) error {
 	for i, step := range s.Damage {
 		kind, err := step.Kind()
 		if err != nil {
@@ -484,20 +765,42 @@ func runDamage(ctx context.Context, drv sandbox.Driver, s *scenario.Scenario, ti
 		}
 		prefix := fmt.Sprintf("damage[%d]", i)
 		if kind == scenario.StepParallel {
-			if err := runParallel(ctx, drv, i, step, timeout); err != nil {
+			start := time.Now()
+			if err := runParallel(ctx, drv, i, step, timeout, res); err != nil {
 				return err
 			}
+			res.Steps = append(res.Steps, StepTiming{
+				Index: i,
+				Kind:  string(kind),
+				US:    time.Since(start).Microseconds(),
+			})
 			continue
 		}
-		if err := execStep(ctx, drv, step, prefix, stepTimeout(step, timeout)); err != nil {
-			return err
+		for iter := range stepRepeat(step) {
+			start := time.Now()
+			if err := execStep(ctx, drv, step, iter, prefix, stepTimeout(step, timeout)); err != nil {
+				return err
+			}
+			res.Steps = append(res.Steps, StepTiming{
+				Index: i,
+				Kind:  string(kind),
+				US:    time.Since(start).Microseconds(),
+			})
 		}
 	}
 	return nil
 }
 
-// runParallel executes the branches of a parallel group concurrently.
-func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario.DamageStep, timeout time.Duration) error {
+// expandIteration replaces the {{i}} placeholder with the iteration index.
+func expandIteration(script string, iter int) string {
+	return strings.ReplaceAll(script, "{{i}}", strconv.Itoa(iter))
+}
+
+// runParallel executes the branches of a parallel group concurrently and
+// records one timing per nested step. The durations overlap: each record
+// measures its own execution, so a tool call inside a group still reaches the
+// cost report.
+func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario.DamageStep, timeout time.Duration, res *Result) error {
 	gctx, cancel := context.WithTimeout(ctx, stepTimeout(step, timeout))
 	defer cancel()
 
@@ -512,7 +815,18 @@ func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario
 			defer wg.Done()
 			prefix := fmt.Sprintf("damage[%d] parallel[%d]", idx, b)
 			for _, nested := range branch {
-				if err := execStep(gctx, drv, nested, prefix, stepTimeout(nested, stepTimeout(step, timeout))); err != nil {
+				kind, err := nested.Kind()
+				if err != nil {
+					mu.Lock()
+					if werr == nil {
+						werr = fmt.Errorf("%s: %w", prefix, err)
+					}
+					mu.Unlock()
+					cancel()
+					return
+				}
+				start := time.Now()
+				if err := execStep(gctx, drv, nested, 0, prefix, stepTimeout(nested, stepTimeout(step, timeout))); err != nil {
 					mu.Lock()
 					if werr == nil {
 						werr = err
@@ -521,6 +835,14 @@ func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario
 					cancel()
 					return
 				}
+				elapsed := time.Since(start).Microseconds()
+				mu.Lock()
+				res.Steps = append(res.Steps, StepTiming{
+					Index: idx,
+					Kind:  string(kind),
+					US:    elapsed,
+				})
+				mu.Unlock()
 			}
 		}(b, branch)
 	}
@@ -529,22 +851,22 @@ func runParallel(ctx context.Context, drv sandbox.Driver, idx int, step scenario
 }
 
 // execStep runs one damage step and prefixes its errors with the journal label.
-func execStep(ctx context.Context, drv sandbox.Driver, step scenario.DamageStep, prefix string, timeout time.Duration) error {
+func execStep(ctx context.Context, drv sandbox.Driver, step scenario.DamageStep, iter int, prefix string, timeout time.Duration) error {
 	kind, err := step.Kind()
 	if err != nil {
 		return fmt.Errorf("%s: %w", prefix, err)
 	}
 	switch kind {
 	case scenario.StepShell:
-		if _, err := drv.Exec(ctx, step.Shell, timeout); err != nil {
+		if _, err := drv.Exec(ctx, expandIteration(step.Shell, iter), timeout); err != nil {
 			return fmt.Errorf("%s: %w", prefix, err)
 		}
 	case scenario.StepPostEdit:
-		if _, err := drv.Exec(ctx, step.PostEdit, timeout); err != nil {
+		if _, err := drv.Exec(ctx, expandIteration(step.PostEdit, iter), timeout); err != nil {
 			return fmt.Errorf("%s post_edit: %w", prefix, err)
 		}
 	case scenario.StepToolCall:
-		cmd := step.ToolCall.Args["cmd"]
+		cmd := expandIteration(step.ToolCall.Args["cmd"], iter)
 		if cmd == "" {
 			return fmt.Errorf("%s: toolcall without args.cmd is not supported yet", prefix)
 		}
@@ -629,6 +951,9 @@ func runInterruptRestore(ctx context.Context, drv sandbox.Driver, cfg Config, ro
 	start = time.Now()
 	if _, err := drv.Exec(ctx, script, cfg.Timeout); err != nil {
 		return fmt.Errorf("restore: second pass: %w", err)
+	}
+	if err := syncRestore(drv, cfg.Baseline, filepath.Join(root, "work"), filepath.Join(root, "home")); err != nil {
+		return fmt.Errorf("restore: %w", err)
 	}
 	res.RestoreMS = first + time.Since(start).Milliseconds()
 	return nil

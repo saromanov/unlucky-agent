@@ -94,18 +94,50 @@ Every entry states what still can be recovered and how.
 
 {{range .RecoveryPaths}}- {{.}}
 {{end}}
+{{end}}{{if .Cost}}## Cost
+
+Checkpoint and tool-call percentiles cover the repeated calls of the run; the
+none baseline is the added-latency reference. Durations below one millisecond
+are printed in microseconds. For the local driver, checkpoint and restore
+durations include the sync that makes the copied state durable. Disk figures are
+allocated bytes.
+
+| Scenario | Checkpoints | Checkpoint p50 | Checkpoint p95 | Restore | Tool calls | Tool p50 | Tool p95 | Work disk | Snapshot disk | Peak disk |
+|---|---|---|---|---|---|---|---|---|---|---|
+{{range .Cost}}| {{.ScenarioID}} | {{.Checkpoints}} | {{duration .CheckpointP50US}} | {{duration .CheckpointP95US}} | {{duration .RestoreUS}} | {{.ToolCalls}} | {{duration .ToolP50US}} | {{duration .ToolP95US}} | {{bytes .DiskWork}} | {{bytes .DiskSnapshot}} | {{bytes .PeakDisk}} |
+{{end}}
 {{end}}## Summary
 
 {{.Summary}}
 `
 
-var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{"note": firstSentence}).Parse(markdownTmpl))
+var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{
+	"note":     firstSentence,
+	"bytes":    humanBytes,
+	"duration": humanDuration,
+}).Parse(markdownTmpl))
 
 type mdData struct {
 	*Report
 	Summary       string
 	MetaDefects   []string
 	RecoveryPaths []string
+	Cost          []CostRow
+}
+
+// CostRow is one line of the cost section. Durations are microseconds.
+type CostRow struct {
+	ScenarioID      string
+	Checkpoints     int
+	CheckpointP50US int64
+	CheckpointP95US int64
+	RestoreUS       int64
+	ToolCalls       int
+	ToolP50US       int64
+	ToolP95US       int64
+	DiskWork        int64
+	DiskSnapshot    int64
+	PeakDisk        int64
 }
 
 // WriteMarkdown writes a human-readable report.
@@ -115,8 +147,80 @@ func WriteMarkdown(w io.Writer, r *Report) error {
 		Summary:       summarize(r),
 		MetaDefects:   metaDefects(r),
 		RecoveryPaths: recoveryPaths(r),
+		Cost:          costRows(r),
 	}
 	return mdTemplate.Execute(w, data)
+}
+
+// costRows renders the timing series of a run, one row per scenario that has
+// cost data. Results are already sorted by scenario id.
+func costRows(r *Report) []CostRow {
+	var out []CostRow
+	for _, res := range r.Results {
+		tool := toolCallTimes(res.Steps)
+		if len(res.CheckpointTimesUS) == 0 && len(tool) == 0 {
+			continue
+		}
+		out = append(out, CostRow{
+			ScenarioID:      res.ScenarioID,
+			Checkpoints:     len(res.CheckpointTimesUS),
+			CheckpointP50US: runner.Percentile(res.CheckpointTimesUS, 50),
+			CheckpointP95US: runner.Percentile(res.CheckpointTimesUS, 95),
+			RestoreUS:       res.RestoreMS * 1000,
+			ToolCalls:       len(tool),
+			ToolP50US:       runner.Percentile(tool, 50),
+			ToolP95US:       runner.Percentile(tool, 95),
+			DiskWork:        res.DiskWorkBytes,
+			DiskSnapshot:    maxSnapshot(res.DiskSnapshotBytes),
+			PeakDisk:        res.PeakDiskBytes,
+		})
+	}
+	return out
+}
+
+func toolCallTimes(steps []runner.StepTiming) []int64 {
+	var out []int64
+	for _, s := range steps {
+		if s.Kind == "toolcall" {
+			out = append(out, s.US)
+		}
+	}
+	return out
+}
+
+func maxSnapshot(values []int64) int64 {
+	var maxValue int64
+	for _, v := range values {
+		if v > maxValue {
+			maxValue = v
+		}
+	}
+	return maxValue
+}
+
+// humanDuration formats a microsecond duration: one decimal of a millisecond
+// from 1 ms up, whole microseconds below.
+func humanDuration(us int64) string {
+	if us < 1000 {
+		return fmt.Sprintf("%d µs", us)
+	}
+	return fmt.Sprintf("%.1f ms", float64(us)/1000)
+}
+
+// humanBytes formats an allocated byte count with binary units.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	value := float64(n)
+	idx := -1
+	for value >= unit && idx < len(units)-1 {
+		value /= unit
+		idx++
+	}
+	return fmt.Sprintf("%.2f %s", value, units[idx])
 }
 
 // firstSentence shortens a note to its first clause for the matrix cell.

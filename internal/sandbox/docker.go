@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,7 +54,7 @@ type Docker struct {
 // DockerConfig configures the docker driver.
 type DockerConfig struct {
 	// Image is the sandbox image. It must contain sh, find and tar; the
-	// scenarios add git where needed.
+	// scenarios add git where needed. The disk metrics also need du.
 	Image string
 	// EvidenceDir is the only host bind mount, created by the driver.
 	EvidenceDir string
@@ -405,6 +406,28 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// SnapshotBytes implements SnapshotSizer: it reports the allocated size of the
+// scratch tree that holds the checkpoint archives.
+func (d *Docker) SnapshotBytes(ctx context.Context, baseline string) (int64, error) {
+	if baseline == "none" {
+		return 0, nil
+	}
+	return d.duBytes(ctx, containerScratch)
+}
+
+// DirBytes implements StorageSizer: it reports the allocated size of the
+// container work or home tree.
+func (d *Docker) DirBytes(ctx context.Context, name string) (int64, error) {
+	switch name {
+	case "work":
+		return d.duBytes(ctx, containerWork)
+	case "home":
+		return d.duBytes(ctx, containerHome)
+	default:
+		return 0, fmt.Errorf("docker dir bytes: unknown tree %q", name)
+	}
+}
+
 // Close removes the container.
 func (d *Docker) Close() error {
 	if !d.started {
@@ -416,6 +439,23 @@ func (d *Docker) Close() error {
 		return fmt.Errorf("sandbox docker: rm: %w: %s", err, out)
 	}
 	return nil
+}
+
+// duBytes reports the allocated size of a container path in bytes.
+func (d *Docker) duBytes(ctx context.Context, dir string) (int64, error) {
+	out, err := d.Exec(ctx, "du -sk "+dir, 30*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("docker du %s: %w", dir, err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("docker du %s: empty output %q", dir, out)
+	}
+	kib, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("docker du %s: parse %q: %w", dir, fields[0], err)
+	}
+	return kib * 1024, nil
 }
 
 func (d *Docker) cli(ctx context.Context, args ...string) ([]byte, error) {

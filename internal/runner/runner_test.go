@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/saromanov/unlucky-agent/internal/manifest"
 	"github.com/saromanov/unlucky-agent/internal/oracle"
 	"github.com/saromanov/unlucky-agent/internal/sandbox"
 	"github.com/saromanov/unlucky-agent/internal/scenario"
@@ -578,5 +580,311 @@ func TestExecInterrupt(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "done") {
 		t.Fatalf("output is lost: %q", out)
+	}
+}
+
+func TestRepeatExpandsIterationPlaceholder(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{
+		{Shell: "printf 'run %s\n' {{i}} > rep-{{i}}.txt", Repeat: 3},
+		{
+			ToolCall: &scenario.ToolCall{
+				Name: "append_line",
+				Args: map[string]string{"cmd": "printf 'call %s\n' {{i}} >> tool-{{i}}.txt"},
+			},
+			Repeat: 2,
+		},
+		{Shell: "rm -rf docs"},
+	}, []string{"work/docs/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+
+	counts := map[string]int{}
+	for _, step := range res.Steps {
+		counts[step.Kind]++
+		if step.Index < 0 || step.Index > 2 {
+			t.Fatalf("step index %d is out of range", step.Index)
+		}
+	}
+	if counts[string(scenario.StepShell)] != 4 {
+		t.Fatalf("shell timings=%d, want 4: %+v", counts[string(scenario.StepShell)], res.Steps)
+	}
+	if counts[string(scenario.StepToolCall)] != 2 {
+		t.Fatalf("toolcall timings=%d, want 2: %+v", counts[string(scenario.StepToolCall)], res.Steps)
+	}
+	for _, step := range res.Steps {
+		if step.Kind == string(scenario.StepToolCall) && step.US <= 0 {
+			t.Fatalf("a tool call must carry a positive microsecond duration: %+v", step)
+		}
+	}
+
+	paths := manifestPaths(t, res.Artifacts["damaged"])
+	for _, want := range []string{
+		"work/rep-0.txt", "work/rep-1.txt", "work/rep-2.txt",
+		"work/tool-0.txt", "work/tool-1.txt",
+	} {
+		if !paths[want] {
+			t.Fatalf("%s is missing from the damaged manifest", want)
+		}
+	}
+	if paths["work/rep-{{i}}.txt"] || paths["work/tool-{{i}}.txt"] {
+		t.Fatal("the placeholder must be expanded before execution")
+	}
+}
+
+func manifestPaths(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, line := range lines[1:] {
+		var entry manifest.Entry
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Path != "" {
+			out[entry.Path] = true
+		}
+	}
+	return out
+}
+
+func TestCheckpointRepeatSeries(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	s.Checkpoint.Repeat = 3
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	if len(res.CheckpointTimesUS) != 3 {
+		t.Fatalf("checkpoint series=%v, want 3 values", res.CheckpointTimesUS)
+	}
+	if len(res.DiskSnapshotBytes) != 3 {
+		t.Fatalf("snapshot series=%v, want 3 values", res.DiskSnapshotBytes)
+	}
+	for _, v := range res.DiskSnapshotBytes {
+		if v <= 0 {
+			t.Fatalf("a checkpoint must occupy disk: %v", res.DiskSnapshotBytes)
+		}
+	}
+	if res.DiskWorkBytes <= 0 {
+		t.Fatalf("work disk=%d, want > 0", res.DiskWorkBytes)
+	}
+	if res.PeakDiskBytes < res.DiskWorkBytes {
+		t.Fatalf("peak disk=%d is below the work tree=%d", res.PeakDiskBytes, res.DiskWorkBytes)
+	}
+}
+
+func TestCheckpointRepeatKeepsOneSlot(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	s.Checkpoint.Repeat = 3
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	first, last := res.DiskSnapshotBytes[0], res.DiskSnapshotBytes[len(res.DiskSnapshotBytes)-1]
+	if last > first+first/10 {
+		t.Fatalf("the snapshot slot grows across checkpoints: %v", res.DiskSnapshotBytes)
+	}
+}
+
+func TestPercentile(t *testing.T) {
+	if got := Percentile(nil, 50); got != 0 {
+		t.Fatalf("an empty series must be 0, got %d", got)
+	}
+	values := []int64{50, 10, 40, 20, 30}
+	if got := Percentile(values, 50); got != 30 {
+		t.Fatalf("p50=%d, want 30", got)
+	}
+	if got := Percentile(values, 95); got != 50 {
+		t.Fatalf("p95=%d, want 50", got)
+	}
+	if got := Percentile(values, 100); got != 50 {
+		t.Fatalf("p100=%d, want 50", got)
+	}
+	if values[0] != 50 {
+		t.Fatal("Percentile must not reorder the input")
+	}
+}
+
+func TestSyncPaths(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncPaths([]string{root, filepath.Join(root, "missing")}); err != nil {
+		t.Fatalf("syncPaths must flush an existing tree and skip a missing path: %v", err)
+	}
+	file := filepath.Join(sub, "f.txt")
+	if err := syncPaths([]string{file}); err != nil {
+		t.Fatalf("syncPaths must flush a single regular file: %v", err)
+	}
+}
+
+type sizedDriver struct {
+	sandbox.Driver
+
+	work         int64
+	home         int64
+	snapshot     int64
+	failDir      bool
+	failSnapshot bool
+}
+
+func (d sizedDriver) Name() string { return "sized" }
+
+func (d sizedDriver) DirBytes(_ context.Context, name string) (int64, error) {
+	if d.failDir {
+		return 0, fmt.Errorf("du: not found")
+	}
+	switch name {
+	case "work":
+		return d.work, nil
+	case "home":
+		return d.home, nil
+	default:
+		return 0, fmt.Errorf("sized driver: unknown tree %q", name)
+	}
+}
+
+func (d sizedDriver) SnapshotBytes(_ context.Context, baseline string) (int64, error) {
+	if d.failSnapshot {
+		return 0, fmt.Errorf("du: not found")
+	}
+	if baseline == "none" {
+		return 0, nil
+	}
+	return d.snapshot, nil
+}
+
+func TestStorageSizerDiskMetrics(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	drv := sizedDriver{
+		Driver:   sandbox.NewLocal(),
+		work:     11 << 20,
+		home:     2 << 20,
+		snapshot: 3 << 20,
+	}
+	res, err := Run(context.Background(), Config{
+		Scenario: s,
+		Baseline: "cp-r",
+		OutDir:   t.TempDir(),
+		Driver:   drv,
+		Timeout:  60 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DiskWorkBytes != 11<<20 {
+		t.Fatalf("work disk=%d, want the sandbox tree size %d", res.DiskWorkBytes, int64(11<<20))
+	}
+	if len(res.DiskSnapshotBytes) != 1 || res.DiskSnapshotBytes[0] != 3<<20 {
+		t.Fatalf("snapshot series=%v, want the sandbox size %d", res.DiskSnapshotBytes, int64(3<<20))
+	}
+	if want := int64((11 + 2 + 3) << 20); res.PeakDiskBytes != want {
+		t.Fatalf("peak disk=%d, want work+home+snapshot=%d (host staging must not leak in)", res.PeakDiskBytes, want)
+	}
+}
+
+func TestStorageSizerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		drv  sizedDriver
+	}{
+		{"dir", sizedDriver{Driver: sandbox.NewLocal(), failDir: true}},
+		{"snapshot", sizedDriver{Driver: sandbox.NewLocal(), failSnapshot: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+			res, err := Run(context.Background(), Config{
+				Scenario: s,
+				Baseline: "cp-r",
+				OutDir:   t.TempDir(),
+				Driver:   tc.drv,
+				Timeout:  60 * time.Second,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Verdict != VerdictError {
+				t.Fatalf("a failed disk measurement must be ERROR, got %s", res.Verdict)
+			}
+			if !strings.Contains(res.Reason, "disk measurement:") {
+				t.Fatalf("the reason must name the measurement, got %q", res.Reason)
+			}
+			if res.RecoveryPath == "" {
+				t.Fatal("a failed disk measurement must carry a recovery path")
+			}
+		})
+	}
+}
+
+func TestParallelRecordsNestedTimings(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{
+		{Parallel: [][]scenario.DamageStep{
+			{{ToolCall: &scenario.ToolCall{
+				Name: "append_line",
+				Args: map[string]string{"cmd": "printf a > a.txt"},
+			}}},
+			{{Shell: "printf b > b.txt"}},
+		}},
+		{Shell: "rm -rf docs"},
+	}, []string{"work/docs/**"})
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+
+	var parallel, tool, shell int
+	for _, step := range res.Steps {
+		switch step.Kind {
+		case "parallel":
+			parallel++
+		case string(scenario.StepToolCall):
+			tool++
+			if step.US <= 0 {
+				t.Fatalf("a nested tool call must carry a positive duration: %+v", step)
+			}
+			if step.Index != 0 {
+				t.Fatalf("a nested tool call must carry the group index 0, got %d", step.Index)
+			}
+		case string(scenario.StepShell):
+			shell++
+		}
+	}
+	if parallel != 1 || tool != 1 || shell != 2 {
+		t.Fatalf("timings parallel=%d tool=%d shell=%d, want 1/1/2: %+v", parallel, tool, shell, res.Steps)
+	}
+}
+
+func TestPreCheckpointRepeat(t *testing.T) {
+	s := inlineScenario([]scenario.DamageStep{{Shell: "rm -rf src"}}, []string{"work/src/**"})
+	s.Checkpoint.Pre = []scenario.DamageStep{{
+		Shell:  "printf '%s\n' {{i}} > pre-{{i}}.txt",
+		Repeat: 3,
+	}}
+	res := runInline(t, s, "cp-r")
+	if res.Verdict != VerdictPass {
+		t.Fatalf("cp-r must restore the tree: verdict=%s reason=%s", res.Verdict, res.Reason)
+	}
+	paths := manifestPaths(t, res.Artifacts["restored"])
+	for _, want := range []string{"work/pre-0.txt", "work/pre-1.txt", "work/pre-2.txt"} {
+		if !paths[want] {
+			t.Fatalf("%s is missing from the restored manifest", want)
+		}
+	}
+	if paths["work/pre-{{i}}.txt"] {
+		t.Fatal("the placeholder must be expanded in a pre-checkpoint step")
+	}
+	if len(res.Steps) != 1 || res.Steps[0].Kind != string(scenario.StepShell) || res.Steps[0].Index != 0 {
+		t.Fatalf("pre-checkpoint steps must not be recorded as damage timings: %+v", res.Steps)
 	}
 }
