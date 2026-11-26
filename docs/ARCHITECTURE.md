@@ -521,3 +521,48 @@ are never mixed with new ones.
 - A cloud service and accounts.
 - Comparing tools inside one workspace simultaneously: runs are isolated.
 - An automatic leaderboard: publication is manual and follows external reproduction.
+
+## 18. Future work
+
+### 18.1. KVM sandbox driver
+
+A VM-backed `sandbox.Driver` (`-sandbox kvm`) gives a guest kernel of its own and
+unlocks a block-level snapshot baseline that no container driver can provide.
+
+Value over the incus driver:
+
+- A separate kernel: a rollback tool or a damage step cannot reach the host
+  even through a container-runtime escape.
+- The `filesystem snapshot` tier of the README becomes testable without a
+  btrfs/zfs pool on the host: a checkpoint is a qcow2 internal snapshot of the
+  guest disk, a restore rolls the block device back. This is the only realistic
+  path to the `vm-snap` baseline.
+- Scenarios touching kernel state (mount, setuid, ioctls) run against a real
+  guest kernel.
+
+Design:
+
+- Runtime: Firecracker (fast boot, minimal API) or QEMU; the `sandbox.Driver`
+  interface stays unchanged.
+- Guest image: a small image with `sh`, `find`, `tar`, `du` and a persistent
+  in-guest exec agent (or SSH over a host-only socket with ControlMaster
+  multiplexing). Without multiplexing the per-exec latency of S19/S20 measures
+  the transport, not the rollback tool.
+- `Prepare` boots a fresh VM per scenario: `resources.disk_mb` maps to the
+  work/home/scratch tmpfs sizes, memory maps to the VM limit.
+- `CaptureRoots` streams work and home out with tar over the exec channel,
+  same as the container drivers; no 9p/virtiofs host share, to keep the
+  isolation story intact.
+- Guard: DMI/`systemd-detect-virt` marker, absence of host shares in
+  `/proc/mounts`, only `lo` in the guest network namespace.
+- New baseline `vm-snap`: snapshot/restore of the block device, restore is
+  byte-exact across metadata, so the oracle checks it under the strict tier.
+
+Cost: roughly 1.5–2k lines (image pipeline, exec channel, guard, qcow2
+rollback, tests) plus a guest-image build target; integration tests need
+`/dev/kvm` on the host. A cheaper partial path exists: run the existing
+docker driver under Kata containers — VM isolation with no new driver, but no
+`vm-snap` baseline either.
+
+Sequencing: validate the incus driver on a real host first; the KVM driver is
+worth its cost only when the block-snapshot tier is actually on the roadmap.
