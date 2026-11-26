@@ -77,6 +77,21 @@ A custom image must provide `sh`, `find`, `tar` and `du`. `du` feeds the cost me
 (`disk_work_bytes`, `disk_snapshot_bytes`, `peak_disk_bytes`); when it is missing the run fails
 with a `disk measurement` error instead of reporting zeros.
 
+The `incus` driver runs the same layout inside an unprivileged Incus container:
+
+```sh
+./bin/unlucky-agent run -all -dir scenarios -baseline cp-r -sandbox incus -out out/incus
+```
+
+Each scenario gets a fresh container from `images:debian/12/cloud` (`-incus-image` overrides it).
+The container runs with `security.privileged=false`, `security.devlxd=false`, no network devices,
+and `limits.memory`/`limits.processes` from the same floors as docker. The work, home and scratch
+trees are tmpfs mounts installed through `raw.lxc` at the sizes above; the evidence directory is
+the only host bind. The pre-flight guard checks the uid and `$HOME`, requires a `fuse.lxcfs` mount
+as the container marker, requires work, home and scratch to be tmpfs, allows only the loopback
+interface in the network namespace, and refuses any other disk-backed mount with `GUARD_FAILED`.
+The host canary works the same way.
+
 A host canary writes marker files into the temp directory, the output directory and `$HOME` and
 re-hashes them after the run. Any change or removal fails the run with `CANARY_FAILED`, even when
 all scenarios passed.
@@ -147,7 +162,7 @@ internal/oracle        diff, policy, verdicts
 internal/fixture       deterministic fixtures
 internal/baseline      reference rollback strategies
 internal/runner        scenario execution
-internal/sandbox       local and docker drivers, guard, canary
+internal/sandbox       local, docker and incus drivers, guard, canary
 internal/shim          barrier scripts (files + flock)
 internal/report        JSON and Markdown reports
 scenarios              S01-S09, S13-S21
@@ -166,8 +181,8 @@ The technical requirements document is maintained outside the repository.
 
 The default `local` driver executes damage commands as a local subprocess inside a temporary
 directory. It does not isolate the host filesystem at the kernel level, so only run scenarios you
-have read. Use `-sandbox docker` for kernel-level isolation together with the pre-flight guard
-and the host canary.
+have read. Use `-sandbox docker` or `-sandbox incus` for kernel-level isolation together with the
+pre-flight guard and the host canary.
 
 ## License
 

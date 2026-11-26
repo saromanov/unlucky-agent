@@ -68,6 +68,7 @@ func usage() {
   unlucky-agent run -scenario scenarios/S02.yaml -baseline cp-r -out out/
   unlucky-agent run -scenario scenarios/S13.yaml -baseline cp-r -repeat 5 -out out/
   unlucky-agent run -all -dir scenarios -baseline cp-r -sandbox docker -out out/
+  unlucky-agent run -all -dir scenarios -baseline cp-r -sandbox incus -out out/
   unlucky-agent version
 `)
 }
@@ -194,14 +195,15 @@ func cmdRun(args []string) error {
 	repeat := fs.Int("repeat", 1, "consecutive runs per scenario; divergent verdicts become FLAKY")
 	all := fs.Bool("all", false, "run every scenario from -dir")
 	dir := fs.String("dir", "scenarios", "scenario directory for -all")
-	sandboxMode := fs.String("sandbox", "local", "sandbox driver: local or docker")
+	sandboxMode := fs.String("sandbox", "local", "sandbox driver: local, docker or incus")
 	image := fs.String("image", sandbox.DefaultImage, "sandbox image (docker driver)")
-	memory := fs.Int("memory", sandbox.DefaultMemoryMB, "sandbox memory floor in MB (docker driver, scenarios may raise it)")
+	incusImage := fs.String("incus-image", sandbox.DefaultIncusImage, "sandbox image (incus driver)")
+	memory := fs.Int("memory", sandbox.DefaultMemoryMB, "sandbox memory floor in MB (container drivers, scenarios may raise it)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	switch *sandboxMode {
-	case "local", "docker":
+	case "local", "docker", "incus":
 	default:
 		return fmt.Errorf("run: unknown sandbox %q", *sandboxMode)
 	}
@@ -209,7 +211,7 @@ func cmdRun(args []string) error {
 		return fmt.Errorf("run: -repeat must be >= 1")
 	}
 	// The tar baseline runs GNU tar against the host staging tree.
-	if *sandboxMode == "docker" && *baselineName == "tar" {
+	if *sandboxMode != "local" && *baselineName == "tar" {
 		return fmt.Errorf("baseline tar is host-only, use local sandbox or cp-r")
 	}
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
@@ -236,10 +238,12 @@ func cmdRun(args []string) error {
 
 	started := time.Now()
 	dockerMode := *sandboxMode == "docker"
+	incusMode := *sandboxMode == "incus"
+	containerMode := dockerMode || incusMode
 
 	// The canary guards host directories the sandbox must never write to.
 	var can *sandbox.Canary
-	if dockerMode {
+	if containerMode {
 		dirs := []string{os.TempDir(), *outDir}
 		if home, err := os.UserHomeDir(); err == nil {
 			dirs = append(dirs, home)
@@ -272,6 +276,19 @@ func cmdRun(args []string) error {
 				// scenario may raise it above the -memory floor.
 				drv, err := sandbox.NewDocker(sandbox.DockerConfig{
 					Image:         *image,
+					EvidenceDir:   filepath.Join(*outDir, "evidence"),
+					MemoryMB:      max(*memory, s.Resources.MemoryMB),
+					WorkSizeMB:    max(sandbox.DefaultWorkSizeMB, s.Resources.DiskMB+64),
+					ScratchSizeMB: max(sandbox.DefaultScratchSizeMB, s.Resources.DiskMB),
+				})
+				if err != nil {
+					return err
+				}
+				cfg.Driver = drv
+			}
+			if incusMode {
+				drv, err := sandbox.NewIncus(sandbox.IncusConfig{
+					Image:         *incusImage,
 					EvidenceDir:   filepath.Join(*outDir, "evidence"),
 					MemoryMB:      max(*memory, s.Resources.MemoryMB),
 					WorkSizeMB:    max(sandbox.DefaultWorkSizeMB, s.Resources.DiskMB+64),
