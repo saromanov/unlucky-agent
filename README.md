@@ -15,15 +15,16 @@ what a tool adds over the obvious answer.
 
 ## Status
 
-v0.1.0-dev. Early skeleton: scenario parser, manifest capture, oracle, report, runner with
-`none`, `cp-r`, `tar` and `perfect` baselines, plus an optional container sandbox with a pre-flight
-guard and a host canary. Scenarios cover git shadowing of untracked files (S01-S04), files outside
+v0.1.0. Working release: scenario parser, manifest capture, oracle, report, runner with
+`none`, `cp-r`, `tar` and `perfect` baselines, plus container sandboxes (`docker`, `incus`)
+with a pre-flight guard and a host canary. Scenarios cover git shadowing of untracked files (S01-S04), files outside
 the project (S05), large and sparse files (S06), special files with hardlinks, setuid, fifos and
 sockets (S07), path-name edge cases (S09), concurrent sessions, torn state, an interrupted
 restore and a restore overlapping a live writer (S13, S14, S15, S18), a corrupted `.git` and
 shadow repository (S16), a checkpoint under ~95% disk pressure (S17), rollback safety (S21) and
 the cost of rollback on a 50k-file repository (S19, S20).
-The adapter protocol is next.
+Heavy scenarios S06, S19, S20 need a host with 8+ GiB RAM.
+The adapter protocol (JSON-RPC over stdio for external rollback tools) is next.
 
 Working name: the repository name may change before the first public release.
 

@@ -175,7 +175,7 @@ func entryFor(rootName, rel, full string, xattrOK bool) (Entry, error) {
 		e.UID = st.Uid
 		e.GID = st.Gid
 		e.Blocks = st.Blocks
-		e.NLink = st.Nlink
+		e.NLink = statValue(st.Nlink)
 		e.Mode = st.Mode & 0o7777
 	}
 
@@ -206,6 +206,8 @@ func entryFor(rootName, rel, full string, xattrOK bool) (Entry, error) {
 
 	return e, nil
 }
+
+func statValue[T ~uint32 | ~uint64](v T) uint64 { return uint64(v) }
 
 func typeName(m os.FileMode) string {
 	switch {
