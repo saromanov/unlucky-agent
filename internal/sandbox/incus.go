@@ -16,13 +16,11 @@ import (
 	"github.com/saromanov/unlucky-agent/internal/manifest"
 )
 
-// Defaults for the incus driver.
 const (
 	DefaultIncusImage = "images:debian/12/cloud"
 	incusHomeSizeMB   = 64
 )
 
-// Incus runs scenario commands inside an unprivileged Incus container.
 type Incus struct {
 	image     string
 	incusBin  string
@@ -39,29 +37,17 @@ type Incus struct {
 	logs    []byte
 }
 
-// IncusConfig configures the incus driver.
 type IncusConfig struct {
-	// Image is the sandbox image. The cloud variant guarantees the uid 1000
-	// user; the image must contain sh, find, tar and du.
-	Image string
-	// EvidenceDir is the only host bind mount, created by the driver.
-	EvidenceDir string
-	// MemoryMB is the container memory limit.
-	MemoryMB int
-	// WorkSizeMB is the work tmpfs size; it comes from the scenario disk_mb.
-	WorkSizeMB int
-	// ScratchSizeMB is the scratch tmpfs size; snapshot archives live there.
+	Image         string
+	EvidenceDir   string
+	MemoryMB      int
+	WorkSizeMB    int
 	ScratchSizeMB int
-	// PidsLimit bounds the process count inside the container.
-	PidsLimit int64
-	// IncusBin overrides the incus executable path.
-	IncusBin string
-	// ExtraRunArgs are extra `incus config set key=value` pairs; used by
-	// tests to break the sandbox layout on purpose.
-	ExtraRunArgs []string
+	PidsLimit     int64
+	IncusBin      string
+	ExtraRunArgs  []string
 }
 
-// NewIncus returns an incus sandbox driver.
 func NewIncus(cfg IncusConfig) (*Incus, error) {
 	if cfg.Image == "" {
 		cfg.Image = DefaultIncusImage
@@ -111,7 +97,6 @@ func NewIncus(cfg IncusConfig) (*Incus, error) {
 
 func (i *Incus) Name() string { return "incus" }
 
-// Prepare creates and starts the container, then installs the staged fixture.
 func (i *Incus) Prepare(ctx context.Context, host HostDirs) error {
 	if host.Work == "" || host.Home == "" {
 		return fmt.Errorf("sandbox incus: work and home must be set")
@@ -148,8 +133,6 @@ func (i *Incus) Prepare(ctx context.Context, host HostDirs) error {
 	return nil
 }
 
-// configure applies the limits, the evidence device and the test seam before
-// the first start.
 func (i *Incus) configure(ctx context.Context) error {
 	if err := i.removeNICs(ctx); err != nil {
 		return err
@@ -173,8 +156,6 @@ func (i *Incus) configure(ctx context.Context) error {
 	return nil
 }
 
-// removeNICs drops every network interface of the container: an instance
-// device is removed, an inherited one is masked with a none device.
 func (i *Incus) removeNICs(ctx context.Context) error {
 	out, err := i.cli(ctx, "query", "/1.0/instances/"+i.name)
 	if err != nil {
@@ -206,8 +187,6 @@ func (i *Incus) removeNICs(ctx context.Context) error {
 	return nil
 }
 
-// mountTmpfs installs the work, home and scratch tmpfs mounts through raw.lxc
-// and restarts the container: mount entries apply on start only.
 func (i *Incus) mountTmpfs(ctx context.Context) error {
 	if out, err := i.cli(ctx, "config", "set", i.name, "raw.lxc", i.mountEntries()); err != nil {
 		return fmt.Errorf("sandbox incus: raw.lxc: %w: %s", err, out)
@@ -218,7 +197,6 @@ func (i *Incus) mountTmpfs(ctx context.Context) error {
 	return nil
 }
 
-// mountEntries builds the lxc.mount.entry lines for the three tmpfs trees.
 func (i *Incus) mountEntries() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "lxc.mount.entry = tmpfs %s tmpfs rw,nosuid,size=%dm,uid=1000,gid=1000,mode=0755,create=dir\n",
@@ -230,8 +208,6 @@ func (i *Incus) mountEntries() string {
 	return b.String()
 }
 
-// copyIn streams the src tree into dst inside the container as uid 1000.
-// --sparse keeps fixture holes: GNU tar rebuilds them on extraction.
 func (i *Incus) copyIn(ctx context.Context, src, dst string) error {
 	tarCmd := execCommandContext(ctx, "tar", "--sparse", "-C", src, "-cf", "-", ".")
 	execCmd := execCommandContext(ctx, i.incusBin, "exec", i.name,
@@ -262,7 +238,6 @@ func (i *Incus) copyIn(ctx context.Context, src, dst string) error {
 	return nil
 }
 
-// Guard verifies the isolation boundary before the first damage step.
 func (i *Incus) Guard(ctx context.Context) error {
 	out, err := i.execRaw(ctx, incusGuardScript, 30*time.Second)
 	if err != nil {
@@ -274,8 +249,6 @@ func (i *Incus) Guard(ctx context.Context) error {
 	return nil
 }
 
-// Exec runs `sh -c script` inside the container. On timeout the container
-// is stopped and the collected logs are attached to the error.
 func (i *Incus) Exec(ctx context.Context, script string, timeout time.Duration) ([]byte, error) {
 	if i.killed {
 		return nil, fmt.Errorf("sandbox incus: container %s was killed by a previous timeout", i.name)
@@ -293,7 +266,6 @@ func (i *Incus) Exec(ctx context.Context, script string, timeout time.Duration) 
 	return out, nil
 }
 
-// execRaw performs the incus exec call.
 func (i *Incus) execRaw(ctx context.Context, script string, timeout time.Duration) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -311,7 +283,6 @@ func (i *Incus) execRaw(ctx context.Context, script string, timeout time.Duratio
 	return cmd.CombinedOutput()
 }
 
-// killAndCollectLogs stops the container and stores the instance log.
 func (i *Incus) killAndCollectLogs(ctx context.Context) {
 	i.killed = true
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -322,8 +293,6 @@ func (i *Incus) killAndCollectLogs(ctx context.Context) {
 	}
 }
 
-// CaptureRoots streams the sandbox work and home trees out for manifest
-// capture on the host. The undo function removes the copies.
 func (i *Incus) CaptureRoots(hostDir string) ([]manifest.Root, func(), error) {
 	work := filepath.Join(hostDir, "work")
 	home := filepath.Join(hostDir, "home")
@@ -346,7 +315,6 @@ func (i *Incus) CaptureRoots(hostDir string) ([]manifest.Root, func(), error) {
 	}, undo, nil
 }
 
-// copyOut streams the src tree from the container into the dst host directory.
 func (i *Incus) copyOut(src, dst string) error {
 	execCmd := execCommandContext(context.Background(), i.incusBin,
 		"exec", i.name, "--user", "1000", "--", "tar", "--sparse", "-C", src, "-cf", "-", ".")
@@ -377,8 +345,6 @@ func (i *Incus) copyOut(src, dst string) error {
 	return nil
 }
 
-// CPSnapshot implements CPBaseline: the cp-r reference rollback runs fully
-// inside the container.
 func (i *Incus) CPSnapshot(ctx context.Context, timeout time.Duration) error {
 	script := "tar --sparse -C " + containerWork + " -cf " + containerScratch + "/snapshot.tar ."
 	if _, err := i.Exec(ctx, script, timeout); err != nil {
@@ -387,8 +353,6 @@ func (i *Incus) CPSnapshot(ctx context.Context, timeout time.Duration) error {
 	return nil
 }
 
-// CPRestore implements CPBaseline: wipe the work tree and unpack the
-// snapshot, matching baseline.RestoreExact semantics.
 func (i *Incus) CPRestore(ctx context.Context, timeout time.Duration) error {
 	script := "find " + containerWork + " -mindepth 1 -delete && " +
 		"tar -C " + containerWork + " -xf " + containerScratch + "/snapshot.tar"
@@ -398,8 +362,6 @@ func (i *Incus) CPRestore(ctx context.Context, timeout time.Duration) error {
 	return nil
 }
 
-// PerfectSnapshot implements PerfectBaseline: it archives both the work and
-// the home tree at the checkpoint, inside the container.
 func (i *Incus) PerfectSnapshot(ctx context.Context, timeout time.Duration) error {
 	script := "tar -C " + containerWork + " -cf " + containerScratch + "/perfect-work.tar . && " +
 		"tar -C " + containerHome + " -cf " + containerScratch + "/perfect-home.tar ."
@@ -409,8 +371,6 @@ func (i *Incus) PerfectSnapshot(ctx context.Context, timeout time.Duration) erro
 	return nil
 }
 
-// PerfectRestore implements PerfectBaseline: it wipes both trees, unpacks the
-// snapshots and puts preserved post-T edits back.
 func (i *Incus) PerfectRestore(ctx context.Context, timeout time.Duration, preserve []string) error {
 	script, err := perfectRestoreScript(preserve)
 	if err != nil {
@@ -422,8 +382,6 @@ func (i *Incus) PerfectRestore(ctx context.Context, timeout time.Duration, prese
 	return nil
 }
 
-// SnapshotBytes implements SnapshotSizer: it reports the allocated size of the
-// scratch tree that holds the checkpoint archives.
 func (i *Incus) SnapshotBytes(ctx context.Context, baseline string) (int64, error) {
 	if baseline == "none" {
 		return 0, nil
@@ -431,8 +389,6 @@ func (i *Incus) SnapshotBytes(ctx context.Context, baseline string) (int64, erro
 	return i.duBytes(ctx, containerScratch)
 }
 
-// DirBytes implements StorageSizer: it reports the allocated size of the
-// container work or home tree.
 func (i *Incus) DirBytes(ctx context.Context, name string) (int64, error) {
 	switch name {
 	case "work":
@@ -444,7 +400,6 @@ func (i *Incus) DirBytes(ctx context.Context, name string) (int64, error) {
 	}
 }
 
-// Close deletes the container.
 func (i *Incus) Close() error {
 	if !i.started {
 		return nil
@@ -457,7 +412,6 @@ func (i *Incus) Close() error {
 	return nil
 }
 
-// duBytes reports the allocated size of a container path in bytes.
 func (i *Incus) duBytes(ctx context.Context, dir string) (int64, error) {
 	out, err := i.Exec(ctx, "du -sk "+dir, 30*time.Second)
 	if err != nil {

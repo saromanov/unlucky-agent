@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-// skipWithoutIncus gates the integration tests: they need a running Incus
-// daemon and network access to pull the default image.
 func skipWithoutIncus(t *testing.T) {
 	t.Helper()
 	if os.Getenv("UNLUCKY_INCUS_TESTS") != "1" {

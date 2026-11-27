@@ -88,8 +88,6 @@ var allowedDiskMounts = map[string]bool{
 	"/etc/resolv.conf":  true,
 }
 
-// incusGuardScript is the guardScript variant for incus: the container
-// marker is a fuse.lxcfs mount instead of /.dockerenv.
 const incusGuardScript = `printf 'uid=%s\n' "$(id -u)"
 printf 'home=%s\n' "$HOME"
 printf 'links=%s\n' "$(ls /sys/class/net | tr '\n' ' ')"
@@ -99,8 +97,6 @@ cat /proc/self/mountinfo
 printf 'mountinfo-end\n'
 `
 
-// parseIncusGuard interprets incusGuardScript output and returns failed
-// checks. Empty result means the guard passed.
 func parseIncusGuard(out string) []string {
 	var (
 		fails     []string
@@ -151,8 +147,6 @@ func parseIncusGuard(out string) []string {
 	return fails
 }
 
-// checkIncusDevIncus requires the guest API socket to be absent: the script
-// always reports the marker, so a missing line is a failure too.
 func checkIncusDevIncus(devincus string, seen bool) []string {
 	if !seen {
 		return []string{"guest API socket marker missing"}
@@ -167,8 +161,6 @@ func checkIncusDevIncus(devincus string, seen bool) []string {
 	return nil
 }
 
-// checkIncusLinks requires the container network namespace to expose the
-// loopback interface only.
 func checkIncusLinks(links string, seen bool) []string {
 	if !seen {
 		return []string{"network interface list missing"}
@@ -182,8 +174,6 @@ func checkIncusLinks(links string, seen bool) []string {
 	return fails
 }
 
-// incusPseudoFilesystems are the virtual filesystems used by incus that never
-// carry host data. lxcfs backs the container-visible /proc and /sys entries.
 var incusPseudoFilesystems = map[string]bool{
 	"fuse.lxcfs":  true,
 	"fusectl":     true,
@@ -196,9 +186,6 @@ var incusPseudoFilesystems = map[string]bool{
 	"efivarfs":    true,
 }
 
-// incusAllowedDiskMounts are the disk-backed mount points the incus layout
-// permits. The container rootfs lives on a host storage pool by definition,
-// so "/" is allowed.
 var incusAllowedDiskMounts = map[string]bool{
 	"":                   true,
 	"/":                  true,
@@ -209,11 +196,8 @@ var incusAllowedDiskMounts = map[string]bool{
 	"/dev/.incus-mounts": true,
 }
 
-// incusTmpfsPaths must be mounted as tmpfs inside the container.
 var incusTmpfsPaths = []string{containerWork, containerHome, containerScratch}
 
-// incusTmpfsMounts are the only mount points the incus layout may back with
-// tmpfs: the sandbox trees plus the runtime paths the image itself needs.
 var incusTmpfsMounts = map[string]bool{
 	containerWork:                     true,
 	containerHome:                     true,
@@ -230,9 +214,6 @@ var incusTmpfsMounts = map[string]bool{
 	"/sys/fs/cgroup":                  true,
 }
 
-// checkIncusMountinfo flags disk-backed mounts outside the incus allowed set
-// and the missing lxcfs marker, and requires the work, home and scratch trees
-// to be tmpfs.
 func checkIncusMountinfo(mounts []string) []string {
 	var (
 		fails []string
