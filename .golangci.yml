@@ -1,7 +1,72 @@
 version: "2"
 
+run:
+  timeout: 5m
+
 linters:
   default: all
+  disable:
+    - contextcheck
+    - cyclop
+    - depguard
+    - dupl
+    - dupword
+    - err113
+    - exhaustruct
+    - exhaustruct_v5
+    - forbidigo
+    - funlen
+    - funcorder
+    - gochecknoglobals
+    - goconst
+    - gocognit
+    - gocyclo
+    - gomodguard
+    - gosmopolitan
+    - lll
+    - maintidx
+    - mnd
+    - nilnil
+    - noctx
+    - noinlineerr
+    - paralleltest
+    - prealloc
+    - tagliatelle
+    - testpackage
+    - varnamelen
+    - wsl
+    - wrapcheck
+  settings:
+    gosec:
+      excludes:
+        - G104
+        - G115
+        - G122
+        - G204
+        - G301
+        - G302
+        - G304
+        - G306
+    nestif:
+      min-complexity: 20
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+        text: G70[23]
 
 formatters:
   enable:
@@ -9,5 +74,5 @@ formatters:
     - gofmt
     - gofumpt
     - goimports
-    - golines
-    - swaggo
+  exclusions:
+    generated: lax

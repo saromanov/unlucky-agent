@@ -14,9 +14,11 @@ import (
 
 func skipWithoutIncus(t *testing.T) {
 	t.Helper()
+
 	if os.Getenv("UNLUCKY_INCUS_TESTS") != "1" {
 		t.Skip("set UNLUCKY_INCUS_TESTS=1")
 	}
+
 	if err := exec.Command("incus", "info").Run(); err != nil {
 		t.Skip("incus unavailable")
 	}
@@ -29,23 +31,28 @@ type fakeIncus struct {
 
 func (f *fakeIncus) output(t *testing.T) string {
 	t.Helper()
+
 	b, err := os.ReadFile(f.calls)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return string(b)
 }
 
 func (f *fakeIncus) driver(t *testing.T, cfg IncusConfig) *Incus {
 	t.Helper()
+
 	cfg.IncusBin = f.bin
 	if cfg.EvidenceDir == "" {
 		cfg.EvidenceDir = t.TempDir()
 	}
+
 	d, err := NewIncus(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return d
 }
 
@@ -53,10 +60,12 @@ func newFakeIncus(t *testing.T, mountinfo string) *fakeIncus {
 	t.Helper()
 	dir := t.TempDir()
 	f := &fakeIncus{bin: filepath.Join(dir, "incus"), calls: filepath.Join(dir, "calls.log")}
+
 	mountPath := filepath.Join(dir, "mountinfo")
 	if err := os.WriteFile(mountPath, []byte(mountinfo), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> '` + f.calls + `'
 case "$1" in
@@ -98,6 +107,7 @@ exit 0
 	if err := os.WriteFile(f.bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	return f
 }
 
@@ -106,6 +116,7 @@ func newSlowFakeIncus(t *testing.T) *fakeIncus {
 	dir := t.TempDir()
 	f := &fakeIncus{bin: filepath.Join(dir, "incus"), calls: filepath.Join(dir, "calls.log")}
 	stopFlag := filepath.Join(dir, "stopped")
+
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> '` + f.calls + `'
 case "$1" in
@@ -130,6 +141,7 @@ exit 0
 	if err := os.WriteFile(f.bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	return f
 }
 
@@ -159,17 +171,20 @@ func incusMounts() []string {
 func incusMountsShmountsTmpfs() []string {
 	mounts := incusMounts()
 	mounts[9] = "110 100 0:62 / /dev/.incus-mounts rw - tmpfs tmpfs rw,size=100k"
+
 	return mounts
 }
 
 func incusMountsCgroupV1() []string {
 	mounts := incusMounts()
+
 	return append(mounts,
 		"118 100 0:70 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=10240k,mode=755")
 }
 
 func incusMountsGuestAPIBind() []string {
 	mounts := incusMountsShmountsTmpfs()
+
 	return append(mounts,
 		"118 100 0:70 /var/lib/incus/guestapi /dev/incus rw,nosuid,nodev - ext4 /dev/vda1 rw")
 }
@@ -182,6 +197,7 @@ func incusGuardOutput(mounts []string) string {
 func incusMountsEvidenceTmpfs() []string {
 	mounts := incusMounts()
 	mounts[7] = "107 100 0:59 / /sandbox/evidence rw,nosuid - tmpfs none rw,size=64m"
+
 	return mounts
 }
 
@@ -306,11 +322,14 @@ func TestParseIncusGuard(t *testing.T) {
 				if len(fails) != 0 {
 					t.Fatalf("guard must pass, got %v", fails)
 				}
+
 				return
 			}
+
 			if len(fails) == 0 {
 				t.Fatalf("guard must fail, want %q", tt.wantSub)
 			}
+
 			joined := strings.Join(fails, "; ")
 			if !strings.Contains(joined, tt.wantSub) {
 				t.Fatalf("fail mismatch: got %q, want substring %q", joined, tt.wantSub)
@@ -321,6 +340,7 @@ func TestParseIncusGuard(t *testing.T) {
 
 func TestIncusGuardAllowsRootFSAndDockerStyleFiles(t *testing.T) {
 	mounts := incusMounts()
+
 	fails := checkIncusMountinfo(mounts)
 	if len(fails) != 0 {
 		t.Fatalf("rootfs, tmpfs trees and evidence must pass, got %v", fails)
@@ -329,6 +349,7 @@ func TestIncusGuardAllowsRootFSAndDockerStyleFiles(t *testing.T) {
 
 func TestIncusGuardProbe(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
+
 	d := f.driver(t, IncusConfig{})
 	if err := d.Guard(context.Background()); err != nil {
 		t.Fatalf("guard must pass: %v", err)
@@ -338,13 +359,16 @@ func TestIncusGuardProbe(t *testing.T) {
 func TestIncusGuardProbeRejectsMissingLxcfs(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()[0:2]))
 	d := f.driver(t, IncusConfig{})
+
 	err := d.Guard(context.Background())
 	if err == nil {
 		t.Fatal("guard must reject a container without lxcfs")
 	}
+
 	if !errors.Is(err, ErrGuardFailed) {
 		t.Fatalf("error must wrap ErrGuardFailed: %v", err)
 	}
+
 	if !strings.Contains(err.Error(), "fuse.lxcfs") {
 		t.Fatalf("unexpected guard error: %v", err)
 	}
@@ -364,6 +388,7 @@ func TestNewIncusEvidencePathAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
+
 	d, err := NewIncus(IncusConfig{
 		EvidenceDir: filepath.Join("out", "evidence"),
 		IncusBin:    f.bin,
@@ -371,14 +396,17 @@ func TestNewIncusEvidencePathAbsolute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := filepath.Join(dir, "out", "evidence")
 	if d.evidence != want {
 		t.Fatalf("evidence = %q, want %q", d.evidence, want)
 	}
+
 	info, err := os.Stat(d.evidence)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got := info.Mode().Perm(); got != 0o777 {
 		t.Fatalf("evidence mode = %o, want 777", got)
 	}
@@ -393,17 +421,22 @@ func TestIncusPrepareCommands(t *testing.T) {
 		ScratchSizeMB: 4608,
 		ExtraRunArgs:  []string{"security.nesting=true"},
 	})
+
 	work, home := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte("fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := d.Prepare(context.Background(), HostDirs{Root: t.TempDir(), Work: work, Home: home}); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
+
 	out := f.output(t)
+
 	if !filepath.IsAbs(d.evidence) {
 		t.Fatalf("evidence path %q must be absolute", d.evidence)
 	}
+
 	checks := []string{
 		"init images:debian/12/cloud unlucky-agent-",
 		"config device remove " + d.name + " eth0",
@@ -423,9 +456,11 @@ func TestIncusPrepareCommands(t *testing.T) {
 			t.Fatalf("incus calls must contain %q:\n%s", want, out)
 		}
 	}
+
 	if strings.Contains(out, "remove "+d.name+" root") {
 		t.Fatalf("a disk device must not be removed:\n%s", out)
 	}
+
 	if !d.started {
 		t.Fatal("prepare must mark the driver as started")
 	}
@@ -433,6 +468,7 @@ func TestIncusPrepareCommands(t *testing.T) {
 
 func TestIncusPrepareRequiresPaths(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
+
 	d := f.driver(t, IncusConfig{})
 	if err := d.Prepare(context.Background(), HostDirs{}); err == nil {
 		t.Fatal("prepare without work and home must fail")
@@ -443,10 +479,13 @@ func TestIncusInheritedNICMask(t *testing.T) {
 	t.Setenv("FAKE_INCUS_REMOVE_FAIL", "1")
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
 	d := f.driver(t, IncusConfig{})
+
 	work, home := t.TempDir(), t.TempDir()
+
 	if err := d.Prepare(context.Background(), HostDirs{Root: t.TempDir(), Work: work, Home: home}); err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
+
 	out := f.output(t)
 	if !strings.Contains(out, "config device add "+d.name+" eth0 none") {
 		t.Fatalf("an inherited nic must be masked with a none device:\n%s", out)
@@ -456,13 +495,16 @@ func TestIncusInheritedNICMask(t *testing.T) {
 func TestIncusExec(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
 	d := f.driver(t, IncusConfig{})
+
 	out, err := d.Exec(context.Background(), "printf hi", 30*time.Second)
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
+
 	if !strings.Contains(string(out), "exec ok") {
 		t.Fatalf("exec output %q does not contain the fake marker", out)
 	}
+
 	if !strings.Contains(f.output(t), "--user 1000 --cwd /sandbox/work") {
 		t.Fatalf("exec must run as uid 1000 in the work tree:\n%s", f.output(t))
 	}
@@ -471,18 +513,22 @@ func TestIncusExec(t *testing.T) {
 func TestIncusExecTimeout(t *testing.T) {
 	f := newSlowFakeIncus(t)
 	d := f.driver(t, IncusConfig{})
+
 	_, err := d.Exec(context.Background(), "sleep 5", 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("exec must time out")
 	}
+
 	msg := err.Error()
 	if !strings.Contains(msg, "timeout after") || !strings.Contains(msg, "container log line") {
 		t.Fatalf("timeout error must carry the logs: %v", err)
 	}
+
 	out := f.output(t)
 	if !strings.Contains(out, "stop --force "+d.name) {
 		t.Fatalf("timeout must stop the container:\n%s", out)
 	}
+
 	if _, err := d.Exec(context.Background(), "true", time.Second); err == nil ||
 		!strings.Contains(err.Error(), "was killed by a previous timeout") {
 		t.Fatalf("exec after a timeout must fail, got %v", err)
@@ -493,19 +539,24 @@ func TestIncusDuBytes(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
 	d := f.driver(t, IncusConfig{})
 	ctx := context.Background()
+
 	got, err := d.SnapshotBytes(ctx, "cp-r")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if got != 12*1024 {
 		t.Fatalf("snapshot bytes = %d, want %d", got, 12*1024)
 	}
+
 	if got, err := d.SnapshotBytes(ctx, "none"); err != nil || got != 0 {
 		t.Fatalf("none baseline must be zero, got %d, %v", got, err)
 	}
+
 	if got, err := d.DirBytes(ctx, "home"); err != nil || got != 12*1024 {
 		t.Fatalf("home bytes = %d, %v", got, err)
 	}
+
 	if _, err := d.DirBytes(ctx, "elsewhere"); err == nil {
 		t.Fatal("unknown tree must fail")
 	}
@@ -513,6 +564,7 @@ func TestIncusDuBytes(t *testing.T) {
 
 func TestIncusCloseWithoutPrepare(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
+
 	d := f.driver(t, IncusConfig{})
 	if err := d.Close(); err != nil {
 		t.Fatalf("close before prepare must be a no-op: %v", err)
@@ -521,32 +573,42 @@ func TestIncusCloseWithoutPrepare(t *testing.T) {
 
 func stageIncus(t *testing.T, cfg IncusConfig) *Incus {
 	t.Helper()
+
 	work, home := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte("fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(home, "h.txt"), []byte("home\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	if cfg.EvidenceDir == "" {
 		cfg.EvidenceDir = t.TempDir()
 	}
+
 	d, err := NewIncus(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx := context.Background()
 	if err := d.Prepare(ctx, HostDirs{Root: t.TempDir(), Work: work, Home: home}); err != nil {
 		_ = d.Close()
+
 		t.Fatal(err)
 	}
+
 	return d
 }
 
 func TestIncusExecAndGuard(t *testing.T) {
 	skipWithoutIncus(t)
+
 	ctx := context.Background()
+
 	d := stageIncus(t, IncusConfig{})
+
 	defer func() { _ = d.Close() }()
 
 	if err := d.Guard(ctx); err != nil {
@@ -557,6 +619,7 @@ func TestIncusExecAndGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
+
 	if !strings.Contains(string(out), "hi") {
 		t.Fatalf("exec output %q does not contain hi", out)
 	}
@@ -565,16 +628,21 @@ func TestIncusExecAndGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capture roots: %v", err)
 	}
+
 	defer undo()
+
 	var workRoot string
+
 	for _, r := range roots {
 		if r.Name == "work" {
 			workRoot = r.Dir
 		}
 	}
+
 	if workRoot == "" {
 		t.Fatalf("work root is missing from %+v", roots)
 	}
+
 	if _, err := os.Stat(filepath.Join(workRoot, "f.txt")); err != nil {
 		t.Fatalf("fixture file was not copied out: %v", err)
 	}
@@ -587,25 +655,31 @@ func TestIncusExecAndGuard(t *testing.T) {
 func TestIncusPrepareKeepsSparse(t *testing.T) {
 	skipWithoutIncus(t)
 	work := t.TempDir()
+
 	const size = 8 << 20
 
 	sparse := filepath.Join(work, "sparse.bin")
+
 	fh, err := os.Create(sparse)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	block := make([]byte, 4<<10)
 	for i := range block {
 		block[i] = 0x5a
 	}
+
 	for _, off := range []int64{0, 4 << 20} {
 		if _, err := fh.WriteAt(block, off); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := fh.Truncate(size); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := fh.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +688,9 @@ func TestIncusPrepareKeepsSparse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = d.Close() }()
+
 	ctx := context.Background()
 	if err := d.Prepare(ctx, HostDirs{Root: t.TempDir(), Work: work, Home: t.TempDir()}); err != nil {
 		t.Fatal(err)
@@ -624,10 +700,12 @@ func TestIncusPrepareKeepsSparse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
+
 	blocks, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 	if err != nil {
 		t.Fatalf("parse stat output %q: %v", out, err)
 	}
+
 	if blocks*512 >= size/10 {
 		t.Fatalf("copy-in densified the sparse file: %d blocks", blocks)
 	}

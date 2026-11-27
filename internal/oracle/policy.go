@@ -22,6 +22,7 @@ func (p Policy) Excluded(rel string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -32,6 +33,7 @@ func (p Policy) Preserved(rel string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -40,11 +42,13 @@ func (p Policy) Wants(rel string) bool {
 	if len(p.Expected) == 0 {
 		return true
 	}
+
 	for _, g := range p.Expected {
 		if Match(g, rel) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -55,6 +59,7 @@ func (p Policy) AddedAllowed(rel string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -62,6 +67,7 @@ func (p Policy) AddedAllowed(rel string) bool {
 func Match(pattern, p string) bool {
 	ps := split(pattern)
 	xs := split(p)
+
 	return matchSegments(ps, xs)
 }
 
@@ -70,6 +76,7 @@ func split(s string) []string {
 	if s == "" {
 		return nil
 	}
+
 	return strings.Split(s, "/")
 }
 
@@ -77,20 +84,25 @@ func matchSegments(ps, xs []string) bool {
 	if len(ps) == 0 {
 		return len(xs) == 0
 	}
+
 	if ps[0] == "**" {
 		for i := 0; i <= len(xs); i++ {
 			if matchSegments(ps[1:], xs[i:]) {
 				return true
 			}
 		}
+
 		return false
 	}
+
 	if len(xs) == 0 {
 		return false
 	}
+
 	ok, err := path.Match(ps[0], xs[0])
 	if err != nil || !ok {
 		return false
 	}
+
 	return matchSegments(ps[1:], xs[1:])
 }

@@ -1,0 +1,91 @@
+name: Bug report
+description: Report a defect in the bench, a driver, a scenario or a report.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security problems here. Use private vulnerability reporting instead, as
+        described in `SECURITY.md`.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, starting from a clean checkout.
+      placeholder: |
+        make build
+        ./bin/unlucky-agent run -scenario scenarios/S02.yaml -baseline cp-r -out out/s02
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: unlucky-agent version
+      description: Output of `./bin/unlucky-agent version`, or the commit hash.
+      placeholder: 0.1.0-dev
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture and kernel version.
+      placeholder: Linux 6.8.0, amd64
+    validations:
+      required: true
+
+  - type: dropdown
+    id: baseline
+    attributes:
+      label: Baseline
+      description: The `-baseline` value of the failing run.
+      options:
+        - none
+        - cp-r
+        - tar
+        - perfect
+        - custom (-restore)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: sandbox
+    attributes:
+      label: Sandbox driver
+      options:
+        - local
+        - docker
+        - incus
+    validations:
+      required: true
+
+  - type: textarea
+    id: report
+    attributes:
+      label: Report excerpt
+      description: |
+        Relevant part of `report.md` or `report.json`: the scenario id, the verdict and the
+        mismatching paths. Redact absolute home directories.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Prior runs, flakiness with `-repeat N`, host details.
+    validations:
+      required: false

@@ -33,22 +33,27 @@ func DiffFiles(expectedPath, observedPath string, pol Policy) (*Result, error) {
 		if err == nil {
 			return res, nil
 		}
+
 		var unsorted *unsortedError
 		if !errors.As(err, &unsorted) {
 			return nil, err
 		}
+
 		sorted, cleanup, sortErr := sortedTemp(unsorted.path)
 		if sortErr != nil {
 			return nil, fmt.Errorf("sort %s: %w", unsorted.path, sortErr)
 		}
+
 		defer cleanup()
+
 		if unsorted.path == basePath {
 			basePath = sorted
 		} else {
 			obsPath = sorted
 		}
 	}
-	return nil, fmt.Errorf("unsorted manifest after external sort")
+
+	return nil, errors.New("unsorted manifest after external sort")
 }
 
 func mergeFiles(expectedPath, observedPath string, pol Policy) (*Result, error) {
@@ -56,40 +61,54 @@ func mergeFiles(expectedPath, observedPath string, pol Policy) (*Result, error) 
 	if err != nil {
 		return nil, fmt.Errorf("expected manifest: %w", err)
 	}
+
 	defer func() { _ = base.close() }()
+
 	obs, err := openEntryStream(observedPath)
 	if err != nil {
 		return nil, fmt.Errorf("observed manifest: %w", err)
 	}
+
 	defer func() { _ = obs.close() }()
 
 	res := &Result{}
+
 	for base.ok || obs.ok {
 		if obs.ok && (!base.ok || obs.cur.Path < base.cur.Path) {
 			if addedPath(obs.cur, pol) {
 				change := Change{Path: obs.cur.Path, Kind: KindAdded, Detail: obs.cur.Type}
 				res.Added = append(res.Added, change)
 			}
+
 			if err := obs.next(); err != nil {
 				return nil, fmt.Errorf("observed manifest: %w", err)
 			}
+
 			continue
 		}
+
 		b := base.cur
+
 		var o manifest.Entry
+
 		matched := false
+
 		for obs.ok && obs.cur.Path == b.Path {
 			o = obs.cur
 			matched = true
+
 			if err := obs.next(); err != nil {
 				return nil, fmt.Errorf("observed manifest: %w", err)
 			}
 		}
+
 		if err := base.next(); err != nil {
 			return nil, fmt.Errorf("expected manifest: %w", err)
 		}
+
 		classify(res, b, o, matched, pol)
 	}
+
 	return res, nil
 }
 
@@ -97,6 +116,7 @@ func addedPath(e manifest.Entry, pol Policy) bool {
 	if pol.Excluded(e.Path) {
 		return false
 	}
+
 	return !pol.AddedAllowed(e.Path)
 }
 
@@ -106,22 +126,30 @@ func sortedTemp(path string) (string, func(), error) {
 	if err != nil {
 		return "", nil, err
 	}
+
 	defer func() { _ = in.Close() }()
 
 	out, err := os.CreateTemp("", "unlucky-diff-*.jsonl")
 	if err != nil {
 		return "", nil, err
 	}
+
 	cleanup := func() { _ = os.Remove(out.Name()) }
+
 	if err := manifest.SortStream(in, out); err != nil {
 		_ = out.Close()
+
 		cleanup()
+
 		return "", nil, err
 	}
+
 	if err := out.Close(); err != nil {
 		cleanup()
+
 		return "", nil, err
 	}
+
 	return out.Name(), cleanup, nil
 }
 
@@ -142,39 +170,54 @@ func openEntryStream(path string) (*entryStream, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	dec := json.NewDecoder(bufio.NewReaderSize(f, 1<<20))
+
 	var hdr manifest.Header
+
 	if err := dec.Decode(&hdr); err != nil {
 		_ = f.Close()
+
 		return nil, fmt.Errorf("%s: header: %w", path, err)
 	}
+
 	s := &entryStream{f: f, dec: dec, path: path}
 	if err := s.next(); err != nil {
 		_ = f.Close()
+
 		return nil, err
 	}
+
 	return s, nil
 }
 
 func (s *entryStream) next() error {
 	var e manifest.Entry
+
 	err := s.dec.Decode(&e)
 	if errors.Is(err, io.EOF) {
 		s.ok = false
+
 		return nil
 	}
+
 	if err != nil {
 		s.ok = false
+
 		return fmt.Errorf("%s: %w", s.path, err)
 	}
+
 	if s.seen && e.Path < s.last {
 		s.ok = false
+
 		return &unsortedError{path: s.path}
 	}
+
 	s.seen = true
 	s.last = e.Path
 	s.cur = e
 	s.ok = true
+
 	return nil
 }
 

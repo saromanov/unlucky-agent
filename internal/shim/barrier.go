@@ -23,6 +23,7 @@ func SignalScript(name string) string {
 	if !ValidName(name) {
 		return invalidScript
 	}
+
 	return fmt.Sprintf("mkdir -p %s && : > %s", Dir(), marker(name))
 }
 
@@ -31,6 +32,7 @@ func WaitScript(name string, timeout time.Duration) string {
 	if !ValidName(name) {
 		return invalidScript
 	}
+
 	return fmt.Sprintf(`mkdir -p %s
 i=0
 while [ ! -e %s ]; do
@@ -49,6 +51,7 @@ func WaitHeldScript(name string, timeout time.Duration) string {
 	if !ValidName(name) {
 		return invalidScript
 	}
+
 	return fmt.Sprintf(`mkdir -p %s
 i=0
 while :; do
@@ -70,6 +73,7 @@ func WaitFreeScript(name string, timeout time.Duration) string {
 	if !ValidName(name) {
 		return invalidScript
 	}
+
 	return fmt.Sprintf(`if [ ! -e %s ]; then
   exit 0
 fi
@@ -86,6 +90,7 @@ func polls(timeout time.Duration) int {
 	if n < 1 {
 		return 1
 	}
+
 	return n
 }
 
@@ -95,8 +100,10 @@ func flockWait(timeout time.Duration) int {
 	if timeout%time.Second > 0 {
 		s++
 	}
+
 	if s < 1 {
 		return 1
 	}
+
 	return s
 }

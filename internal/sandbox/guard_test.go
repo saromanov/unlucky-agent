@@ -53,11 +53,14 @@ func TestParseGuard(t *testing.T) {
 				if len(fails) != 0 {
 					t.Fatalf("guard must pass, got %v", fails)
 				}
+
 				return
 			}
+
 			if len(fails) == 0 {
 				t.Fatalf("guard must fail, want %q", tt.wantSub)
 			}
+
 			joined := strings.Join(fails, "; ")
 			if !strings.Contains(joined, tt.wantSub) {
 				t.Fatalf("fail mismatch: got %q, want substring %q", joined, tt.wantSub)

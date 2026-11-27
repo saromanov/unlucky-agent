@@ -47,6 +47,7 @@ func (r *Result) Recall() float64 {
 	if r.Expected == 0 {
 		return 1
 	}
+
 	return float64(r.Matched) / float64(r.Expected)
 }
 
@@ -55,6 +56,7 @@ func (r *Result) MetaScore() float64 {
 	if r.Expected == 0 {
 		return 1
 	}
+
 	return float64(r.Expected-len(r.Meta)) / float64(r.Expected)
 }
 
@@ -71,6 +73,7 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 	}
 
 	res := &Result{}
+
 	for _, b := range base {
 		o, ok := index[b.Path]
 		classify(res, b, o, ok, pol)
@@ -80,18 +83,23 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 	for _, b := range base {
 		known[b.Path] = struct{}{}
 	}
+
 	for _, o := range obs {
 		if pol.Excluded(o.Path) {
 			continue
 		}
+
 		if _, ok := known[o.Path]; ok {
 			continue
 		}
+
 		if pol.AddedAllowed(o.Path) {
 			continue
 		}
+
 		res.Added = append(res.Added, Change{Path: o.Path, Kind: KindAdded, Detail: o.Type})
 	}
+
 	return res
 }
 
@@ -101,42 +109,54 @@ func Diff(base, obs []manifest.Entry, pol Policy) *Result {
 func classify(res *Result, b, o manifest.Entry, matched bool, pol Policy) {
 	if pol.Excluded(b.Path) {
 		res.Skipped++
+
 		return
 	}
+
 	if !pol.Wants(b.Path) {
 		return
 	}
+
 	res.Expected++
 
 	if !matched {
 		res.Missing = append(res.Missing, Change{Path: b.Path, Kind: KindMissing, Detail: b.Type})
+
 		return
 	}
+
 	if b.Type != o.Type || b.Hash != o.Hash || b.Link != o.Link {
 		res.Changed = append(res.Changed, Change{
 			Path:   b.Path,
 			Kind:   KindChanged,
 			Detail: fmt.Sprintf("type %s->%s hash %s->%s", b.Type, o.Type, short(b.Hash), short(o.Hash)),
 		})
+
 		return
 	}
+
 	detail := ""
 	if b.Mode != o.Mode || b.UID != o.UID || b.GID != o.GID || !xattrEqual(b.Xattr, o.Xattr) {
 		detail = fmt.Sprintf("mode %04o->%04o uid %d->%d gid %d->%d", b.Mode, o.Mode, b.UID, o.UID, b.GID, o.GID)
 	}
+
 	if b.NLink != o.NLink && b.Type != "dir" {
 		// A directory nlink is 2 plus its subdirectory count, so it drops
 		// whenever a child directory is missing. That loss is already a
 		// missing defect; only file nlink carries hardlink information.
 		detail = appendDetail(detail, fmt.Sprintf("nlink %d->%d", b.NLink, o.NLink))
 	}
+
 	if blocksDrift(b.Blocks, o.Blocks) {
 		detail = appendDetail(detail, fmt.Sprintf("blocks %d->%d", b.Blocks, o.Blocks))
 	}
+
 	if detail != "" {
 		res.Meta = append(res.Meta, Change{Path: b.Path, Kind: KindMeta, Detail: detail})
+
 		return
 	}
+
 	res.Matched++
 }
 
@@ -147,21 +167,26 @@ func Clobber(postEditPath, restoredPath string, pol Policy) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	restored, err := loadEntries(restoredPath)
 	if err != nil {
 		return nil, err
 	}
+
 	index := make(map[string]manifest.Entry, len(restored))
 	for _, e := range restored {
 		index[e.Path] = e
 	}
 
 	var out []Change
+
 	for _, p := range post {
 		if pol.Excluded(p.Path) || !pol.Preserved(p.Path) {
 			continue
 		}
+
 		o, ok := index[p.Path]
+
 		switch {
 		case !ok:
 			out = append(out, Change{Path: p.Path, Kind: KindClobbered, Detail: "removed by rollback"})
@@ -169,6 +194,7 @@ func Clobber(postEditPath, restoredPath string, pol Policy) ([]Change, error) {
 			out = append(out, Change{Path: p.Path, Kind: KindClobbered, Detail: "rollback overwrote the post-T edit"})
 		}
 	}
+
 	return out, nil
 }
 
@@ -183,22 +209,30 @@ func loadEntries(path string) ([]manifest.Entry, error) {
 	defer f.Close()
 
 	dec := json.NewDecoder(f)
+
 	var hdr manifest.Header
+
 	if err := dec.Decode(&hdr); err != nil {
 		return nil, fmt.Errorf("%s: header: %w", path, err)
 	}
+
 	var out []manifest.Entry
+
 	for {
 		var e manifest.Entry
+
 		err := dec.Decode(&e)
 		if err == io.EOF {
 			break
 		}
+
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
+
 		out = append(out, e)
 	}
+
 	return out, nil
 }
 
@@ -206,11 +240,13 @@ func xattrEqual(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
+
 	for k, v := range a {
 		if b[k] != v {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -218,6 +254,7 @@ func short(h string) string {
 	if len(h) > 8 {
 		return h[:8]
 	}
+
 	return h
 }
 
@@ -226,6 +263,7 @@ func appendDetail(detail, part string) string {
 	if detail == "" {
 		return part
 	}
+
 	return detail + " " + part
 }
 
@@ -236,5 +274,6 @@ func blocksDrift(base, observed int64) bool {
 	if diff < 0 {
 		diff = -diff
 	}
+
 	return diff > BlocksTolerance
 }

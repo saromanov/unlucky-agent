@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a scenario, a driver, a baseline or a report change.
+title: "feature: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: |
+        What rollback defect or measurement gap is not covered today. Name the tool class or the
+        scenario family when it applies.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: |
+        The shape you expect: a new scenario id, a new `sandbox.Driver`, a new baseline, or a new
+        field in the report.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing scenarios or flags that almost cover the case, and why they do not.
+    validations:
+      required: false

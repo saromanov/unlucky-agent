@@ -14,16 +14,20 @@ import (
 func captureTo(t *testing.T, roots []manifest.Root) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "m.jsonl")
+
 	f, err := os.Create(p)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := manifest.Capture(roots, f); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	return p
 }
 
@@ -33,13 +37,16 @@ func TestDiffRestoredTree(t *testing.T) {
 	write(t, filepath.Join(base, "sub", "b.txt"), "b", 0o644)
 
 	before := captureTo(t, []manifest.Root{{Name: "work", Dir: base}})
+
 	res, err := DiffFiles(before, before, Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !res.Pass() {
 		t.Fatalf("identical trees must pass: %+v", res)
 	}
+
 	if res.Expected != 3 || res.Matched != 3 {
 		t.Fatalf("expected 3 entries (dir, dir, 2 files), got expected=%d matched=%d", res.Expected, res.Matched)
 	}
@@ -54,6 +61,7 @@ func TestDiffDetectsMissingAndChanged(t *testing.T) {
 	if err := os.Remove(filepath.Join(base, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
+
 	write(t, filepath.Join(base, "b.txt"), "changed", 0o644)
 	after := captureTo(t, []manifest.Root{{Name: "work", Dir: base}})
 
@@ -61,15 +69,19 @@ func TestDiffDetectsMissingAndChanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if res.Pass() {
 		t.Fatal("expected FAIL")
 	}
+
 	if len(res.Missing) != 1 || res.Missing[0].Path != "work/a.txt" {
 		t.Fatalf("missing=%+v", res.Missing)
 	}
+
 	if len(res.Changed) != 1 || res.Changed[0].Path != "work/b.txt" {
 		t.Fatalf("changed=%+v", res.Changed)
 	}
+
 	if res.Recall() >= 1 {
 		t.Fatalf("recall must be below 1, got %v", res.Recall())
 	}
@@ -84,6 +96,7 @@ func TestDiffMetaAndExclude(t *testing.T) {
 	if err := os.Chmod(filepath.Join(base, "run.sh"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	write(t, filepath.Join(base, ".git", "index"), "y", 0o644)
 	after := captureTo(t, []manifest.Root{{Name: "work", Dir: base}})
 
@@ -91,9 +104,11 @@ func TestDiffMetaAndExclude(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(res.Meta) != 1 || res.Meta[0].Path != "work/run.sh" {
 		t.Fatalf("expected a permission meta defect, got %+v", res.Meta)
 	}
+
 	if len(res.Changed) != 0 {
 		t.Fatalf("the excluded .git must not appear in changed: %+v", res.Changed)
 	}
@@ -111,9 +126,11 @@ func TestDiffAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(res.Added) != 1 || res.Added[0].Path != "work/new.txt" {
 		t.Fatalf("added=%+v", res.Added)
 	}
+
 	if !res.Pass() {
 		t.Fatal("an added file must not fail the gates")
 	}
@@ -131,6 +148,7 @@ func TestClobber(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(got) != 1 {
 		t.Fatalf("expected one clobbered path, got %+v", got)
 	}
@@ -150,8 +168,10 @@ func TestDiffBlocksDrift(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			base := manifest.Entry{Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
-				Size: 4096, Blocks: c.base, NLink: 1, Hash: "abc"}
+			base := manifest.Entry{
+				Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
+				Size: 4096, Blocks: c.base, NLink: 1, Hash: "abc",
+			}
 			obs := base
 			obs.Blocks = c.observed
 
@@ -160,12 +180,15 @@ func TestDiffBlocksDrift(t *testing.T) {
 				if len(res.Meta) != 1 {
 					t.Fatalf("expected a blocks meta defect, got %+v", res.Meta)
 				}
+
 				want := fmt.Sprintf("blocks %d->%d", c.base, c.observed)
 				if !strings.Contains(res.Meta[0].Detail, want) {
 					t.Fatalf("detail %q must contain %q", res.Meta[0].Detail, want)
 				}
+
 				return
 			}
+
 			if len(res.Meta) != 0 || res.Matched != 1 {
 				t.Fatalf("block drift within tolerance must match: meta=%+v matched=%d", res.Meta, res.Matched)
 			}
@@ -174,8 +197,10 @@ func TestDiffBlocksDrift(t *testing.T) {
 }
 
 func TestDiffNLinkDefect(t *testing.T) {
-	base := manifest.Entry{Root: "work", Path: "work/hard_a", Type: "file", Mode: 0o644,
-		Size: 4, Blocks: 8, NLink: 2, Hash: "abc"}
+	base := manifest.Entry{
+		Root: "work", Path: "work/hard_a", Type: "file", Mode: 0o644,
+		Size: 4, Blocks: 8, NLink: 2, Hash: "abc",
+	}
 	obs := base
 	obs.NLink = 1
 
@@ -183,17 +208,21 @@ func TestDiffNLinkDefect(t *testing.T) {
 	if len(res.Changed) != 0 {
 		t.Fatalf("a lost hardlink is a meta defect, not a content one: %+v", res.Changed)
 	}
+
 	if len(res.Meta) != 1 || !strings.Contains(res.Meta[0].Detail, "nlink 2->1") {
 		t.Fatalf("expected nlink 2->1, got %+v", res.Meta)
 	}
+
 	if res.MetaScore() >= 1 {
 		t.Fatalf("meta score must drop, got %v", res.MetaScore())
 	}
 }
 
 func TestDiffMetaSeparateFromChanged(t *testing.T) {
-	base := manifest.Entry{Root: "work", Path: "work/hard_a", Type: "file", Mode: 0o644,
-		Size: 4, Blocks: 8, NLink: 2, Hash: "aaaa"}
+	base := manifest.Entry{
+		Root: "work", Path: "work/hard_a", Type: "file", Mode: 0o644,
+		Size: 4, Blocks: 8, NLink: 2, Hash: "aaaa",
+	}
 	obs := base
 	obs.Hash = "bbbb"
 	obs.NLink = 1
@@ -202,6 +231,7 @@ func TestDiffMetaSeparateFromChanged(t *testing.T) {
 	if len(res.Changed) != 1 || res.Changed[0].Path != "work/hard_a" {
 		t.Fatalf("content change must land in changed: %+v", res.Changed)
 	}
+
 	if len(res.Meta) != 0 {
 		t.Fatalf("a content defect must not be reported as meta: %+v", res.Meta)
 	}
@@ -210,22 +240,27 @@ func TestDiffMetaSeparateFromChanged(t *testing.T) {
 func writeManifest(t *testing.T, entries ...manifest.Entry) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "m.jsonl")
+
 	f, err := os.Create(p)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	enc := json.NewEncoder(f)
 	if err := enc.Encode(manifest.Header{Manifest: 1, Schema: manifest.Schema, Root: "work", Platform: "linux", Hash: manifest.HashAlgorithm}); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, e := range entries {
 		if err := enc.Encode(e); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	return p
 }
 
@@ -240,14 +275,17 @@ func TestDiffDirNLinkIsNotADefect(t *testing.T) {
 	if len(res.Meta) != 0 {
 		t.Fatalf("directory nlink must not be a metadata defect: %+v", res.Meta)
 	}
+
 	if res.Matched != 1 {
 		t.Fatalf("directory with a changed nlink must stay matched, got %d", res.Matched)
 	}
 }
 
 func TestDiffFilesReadsJSONL(t *testing.T) {
-	base := manifest.Entry{Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
-		Size: 4096, Blocks: 8, NLink: 1, Hash: "abc"}
+	base := manifest.Entry{
+		Root: "work", Path: "work/a.bin", Type: "file", Mode: 0o644,
+		Size: 4096, Blocks: 8, NLink: 1, Hash: "abc",
+	}
 	obs := base
 	obs.Blocks = 4194304
 
@@ -255,6 +293,7 @@ func TestDiffFilesReadsJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(res.Meta) != 1 || res.Meta[0].Path != "work/a.bin" {
 		t.Fatalf("expected a meta defect from JSONL manifests, got %+v", res.Meta)
 	}
@@ -262,12 +301,15 @@ func TestDiffFilesReadsJSONL(t *testing.T) {
 
 func write(t *testing.T, path, body string, mode os.FileMode) {
 	t.Helper()
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.Chmod(path, mode); err != nil {
 		t.Fatal(err)
 	}

@@ -12,15 +12,19 @@ func TestLoadAllRepoScenarios(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(list) < 4 {
 		t.Fatalf("expected at least 4 scenarios, got %d", len(list))
 	}
+
 	seen := map[string]bool{}
 	for _, s := range list {
 		if seen[s.ID] {
 			t.Fatalf("duplicate id %s", s.ID)
 		}
+
 		seen[s.ID] = true
+
 		if len(s.Damage) == 0 {
 			t.Fatalf("%s: empty damage", s.ID)
 		}
@@ -30,6 +34,7 @@ func TestLoadAllRepoScenarios(t *testing.T) {
 func TestRejectUnknownField(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "S99.yaml")
+
 	body := `
 id: S99
 title: "x"
@@ -41,13 +46,16 @@ restore: {mode: newest}
 damage: [{shell: "true"}]
 unknown_field: 1
 `
+
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err := Load(path)
 	if err == nil {
 		t.Fatal("expected an error for an unknown field")
 	}
+
 	if !strings.Contains(err.Error(), "unknown_field") {
 		t.Fatalf("the error must mention the field, got: %v", err)
 	}
@@ -107,6 +115,7 @@ func TestValidateParallel(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("a valid parallel group must pass: %v", err)
 	}
+
 	if kind, err := ok.Damage[0].Kind(); err != nil || kind != StepParallel {
 		t.Fatalf("kind=%q err=%v, want %q", kind, err, StepParallel)
 	}
@@ -149,6 +158,7 @@ func TestValidateBarrierOp(t *testing.T) {
 			t.Fatalf("%q must be accepted: %v", spec, err)
 		}
 	}
+
 	for _, spec := range []string{
 		"",
 		"signal",
@@ -161,9 +171,11 @@ func TestValidateBarrierOp(t *testing.T) {
 		"signal\ta",
 	} {
 		s := baseScenario(DamageStep{Barrier: spec})
+
 		if spec == "" {
 			continue
 		}
+
 		if err := s.Validate(); err == nil {
 			t.Fatalf("%q must be rejected", spec)
 		}
@@ -172,7 +184,9 @@ func TestValidateBarrierOp(t *testing.T) {
 
 func TestValidateInterrupt(t *testing.T) {
 	s := baseScenario(DamageStep{Shell: "rm -rf x"})
+
 	s.Restore.Interrupt = &InterruptSpec{KillAfterMS: 300}
+
 	if err := s.Validate(); err != nil {
 		t.Fatalf("a positive kill_after_ms must pass: %v", err)
 	}
@@ -183,7 +197,9 @@ func TestValidateInterrupt(t *testing.T) {
 	}
 
 	s.Restore.Interrupt = nil
+
 	s.Restore.ConcurrentWrite = "mkdir -p live; exec 9>live/w.lock; flock 9"
+
 	if err := s.Validate(); err == nil {
 		t.Fatal("concurrent_write without a .barriers/ lock must be rejected")
 	}
@@ -196,7 +212,9 @@ func TestValidateInterrupt(t *testing.T) {
 
 func TestValidateCheckpointPre(t *testing.T) {
 	ok := baseScenario(DamageStep{Shell: "rm -rf x"})
+
 	ok.Checkpoint.Pre = []DamageStep{{Shell: "mkdir -p .fill"}}
+
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("a shell pre step must pass: %v", err)
 	}
@@ -208,10 +226,12 @@ func TestValidateCheckpointPre(t *testing.T) {
 	} {
 		s := baseScenario(DamageStep{Shell: "rm -rf x"})
 		s.Checkpoint.Pre = []DamageStep{step}
+
 		err := s.Validate()
 		if err == nil {
 			t.Fatalf("pre step %+v must be rejected", step)
 		}
+
 		if !strings.Contains(err.Error(), "checkpoint.pre[0]") {
 			t.Fatalf("the error must name the step, got: %v", err)
 		}
@@ -219,6 +239,7 @@ func TestValidateCheckpointPre(t *testing.T) {
 
 	nonShell := baseScenario(DamageStep{Shell: "rm -rf x"})
 	nonShell.Checkpoint.Pre = []DamageStep{{Shell: "true"}, {PostEdit: "true"}}
+
 	err := nonShell.Validate()
 	if err == nil || !strings.Contains(err.Error(), "checkpoint.pre[1]: only shell steps are allowed before the checkpoint") {
 		t.Fatalf("a non-shell pre step must be rejected, got: %v", err)
@@ -230,6 +251,7 @@ func TestParseBarrier(t *testing.T) {
 	if err != nil || op != BarrierWaitHeld || name != "w.lock" {
 		t.Fatalf("op=%q name=%q err=%v", op, name, err)
 	}
+
 	if _, _, err := ParseBarrier("wait"); err == nil {
 		t.Fatal("a barrier without a name must be rejected")
 	}
@@ -237,7 +259,9 @@ func TestParseBarrier(t *testing.T) {
 
 func TestValidateRepeat(t *testing.T) {
 	ok := baseScenario(DamageStep{Shell: "echo {{i}}", Repeat: 3})
+
 	ok.Checkpoint.Repeat = 200
+
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("positive repeats must pass: %v", err)
 	}
@@ -248,7 +272,9 @@ func TestValidateRepeat(t *testing.T) {
 	}
 
 	badCP := baseScenario(DamageStep{Shell: "true"})
+
 	badCP.Checkpoint.Repeat = -1
+
 	if err := badCP.Validate(); err == nil || !strings.Contains(err.Error(), "checkpoint.repeat") {
 		t.Fatalf("a negative checkpoint repeat must be rejected, got: %v", err)
 	}
@@ -264,6 +290,7 @@ func TestValidateParallelRepeat(t *testing.T) {
 		Repeat:   2,
 		Parallel: [][]DamageStep{{{Shell: "true"}}},
 	})
+
 	err := group.Validate()
 	if err == nil || !strings.Contains(err.Error(), "repeat is supported only on shell/post_edit/toolcall steps") {
 		t.Fatalf("a repeated parallel group must be rejected, got: %v", err)
@@ -273,6 +300,7 @@ func TestValidateParallelRepeat(t *testing.T) {
 		{{Shell: "true"}},
 		{{Shell: "true", Repeat: 2}},
 	}})
+
 	err = branch.Validate()
 	if err == nil || !strings.Contains(err.Error(), "parallel branch 1 step 0: repeat is supported only on shell/post_edit/toolcall steps") {
 		t.Fatalf("a repeated nested step must be rejected, got: %v", err)
@@ -290,6 +318,7 @@ func TestLoadCostScenarios(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", id, err)
 		}
+
 		if s.Group != "cost" || s.Fixture != "big_tree" {
 			t.Fatalf("%s: group=%q fixture=%q", id, s.Group, s.Fixture)
 		}

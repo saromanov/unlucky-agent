@@ -82,6 +82,7 @@ func diffCaseMatrix() []struct {
 
 func runDiffMatrix(t *testing.T) {
 	t.Helper()
+
 	for _, c := range diffCaseMatrix() {
 		t.Run(c.name, func(t *testing.T) {
 			basePath := writeManifest(t, c.base...)
@@ -91,6 +92,7 @@ func runDiffMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			want := Diff(sortedCopy(c.base), sortedCopy(c.obs), c.pol)
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("streaming result differs from the in-memory diff:\ngot  %+v\nwant %+v", got, want)
@@ -105,8 +107,11 @@ func TestDiffFilesMatchesDiff(t *testing.T) {
 
 func TestDiffFilesMatchesDiffSmallChunks(t *testing.T) {
 	saved := manifest.SortChunkEntries
+
 	manifest.SortChunkEntries = 3
+
 	defer func() { manifest.SortChunkEntries = saved }()
+
 	runDiffMatrix(t)
 }
 
@@ -123,13 +128,16 @@ func TestDiffFilesExternalSortFallback(t *testing.T) {
 	}
 
 	saved := manifest.SortChunkEntries
+
 	manifest.SortChunkEntries = 2
+
 	defer func() { manifest.SortChunkEntries = saved }()
 
 	got, err := DiffFiles(writeManifest(t, base...), writeManifest(t, obs...), Policy{})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := Diff(sortedCopy(base), sortedCopy(obs), Policy{})
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("fallback result differs from the in-memory diff:\ngot  %+v\nwant %+v", got, want)
@@ -140,5 +148,6 @@ func sortedCopy(entries []manifest.Entry) []manifest.Entry {
 	out := make([]manifest.Entry, len(entries))
 	copy(out, entries)
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+
 	return out
 }

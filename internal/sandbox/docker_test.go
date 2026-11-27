@@ -18,9 +18,11 @@ import (
 // and the sandbox image built with `make image-sandbox`.
 func skipWithoutDocker(t *testing.T) {
 	t.Helper()
+
 	if os.Getenv("UNLUCKY_DOCKER_TESTS") != "1" {
 		t.Skip("set UNLUCKY_DOCKER_TESTS=1")
 	}
+
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skip("docker unavailable")
 	}
@@ -31,46 +33,60 @@ func skipWithoutDocker(t *testing.T) {
 // directory on a real filesystem.
 func diskBackedDir(t *testing.T) string {
 	t.Helper()
+
 	for _, dir := range []string{"/etc", "/var", "/usr", "/home", "/"} {
 		var st unix.Statfs_t
 		if err := unix.Statfs(dir, &st); err != nil {
 			continue
 		}
+
 		switch uint32(st.Type) {
 		case unix.TMPFS_MAGIC, unix.OVERLAYFS_SUPER_MAGIC:
 			continue
 		}
+
 		return dir
 	}
+
 	t.Skip("no disk-backed host directory available for the bind test")
+
 	return ""
 }
 
 func stageDocker(t *testing.T, cfg DockerConfig) *Docker {
 	t.Helper()
+
 	work, home := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(work, "f.txt"), []byte("fixture\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.WriteFile(filepath.Join(home, "h.txt"), []byte("home\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+
 	d, err := NewDocker(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx := context.Background()
 	if err := d.Prepare(ctx, HostDirs{Root: t.TempDir(), Work: work, Home: home}); err != nil {
 		_ = d.Close()
+
 		t.Fatal(err)
 	}
+
 	return d
 }
 
 func TestDockerExecAndGuard(t *testing.T) {
 	skipWithoutDocker(t)
+
 	ctx := context.Background()
+
 	d := stageDocker(t, DockerConfig{EvidenceDir: t.TempDir()})
+
 	defer func() { _ = d.Close() }()
 
 	if err := d.Guard(ctx); err != nil {
@@ -81,6 +97,7 @@ func TestDockerExecAndGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exec: %v", err)
 	}
+
 	if !strings.Contains(string(out), "hi") {
 		t.Fatalf("exec output %q does not contain hi", out)
 	}
@@ -89,16 +106,21 @@ func TestDockerExecAndGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("capture roots: %v", err)
 	}
+
 	defer undo()
+
 	var workRoot string
+
 	for _, r := range roots {
 		if r.Name == "work" {
 			workRoot = r.Dir
 		}
 	}
+
 	if workRoot == "" {
 		t.Fatalf("work root is missing from %+v", roots)
 	}
+
 	if _, err := os.Stat(filepath.Join(workRoot, "f.txt")); err != nil {
 		t.Fatalf("fixture file was not copied out: %v", err)
 	}
@@ -110,21 +132,26 @@ func TestDockerExecAndGuard(t *testing.T) {
 
 func TestDockerGuardRejectsHostBind(t *testing.T) {
 	skipWithoutDocker(t)
+
 	ctx := context.Background()
 	hostDir := diskBackedDir(t)
+
 	d := stageDocker(t, DockerConfig{
 		EvidenceDir:  t.TempDir(),
 		ExtraRunArgs: []string{"-v", hostDir + ":/hijack"},
 	})
+
 	defer func() { _ = d.Close() }()
 
 	err := d.Guard(ctx)
 	if err == nil {
 		t.Fatal("guard must reject a host bind mount")
 	}
+
 	if !errors.Is(err, ErrGuardFailed) {
 		t.Fatalf("error must wrap ErrGuardFailed: %v", err)
 	}
+
 	msg := err.Error()
 	if !strings.Contains(msg, GuardMarker) || !strings.Contains(msg, "disk-backed mount") {
 		t.Fatalf("unexpected guard error: %v", err)
@@ -140,6 +167,7 @@ func TestPerfectRestoreScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, want := range []string{
 		"/sandbox/work/src/HUMAN.md",
 		"/sandbox/home/.config/app/config.toml",
@@ -167,6 +195,7 @@ func TestRunArgsTmpfsSizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	args := strings.Join(def.runArgs("c"), " ")
 	for _, want := range []string{
 		containerWork + ":rw,nosuid,size=64m",
@@ -186,10 +215,12 @@ func TestRunArgsTmpfsSizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	args = strings.Join(big.runArgs("c"), " ")
 	if !strings.Contains(args, containerWork+":rw,nosuid,size=4672m") {
 		t.Fatalf("work tmpfs size must follow the scenario resources:\n%s", args)
 	}
+
 	if !strings.Contains(args, containerScratch+":rw,nosuid,size=4608m") {
 		t.Fatalf("scratch tmpfs size must follow the scenario resources:\n%s", args)
 	}
@@ -200,25 +231,31 @@ func TestRunArgsTmpfsSizes(t *testing.T) {
 func TestDockerPrepareKeepsSparse(t *testing.T) {
 	skipWithoutDocker(t)
 	work := t.TempDir()
+
 	const size = 8 << 20
 
 	sparse := filepath.Join(work, "sparse.bin")
+
 	f, err := os.Create(sparse)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	block := make([]byte, 4<<10)
 	for i := range block {
 		block[i] = 0x5a
 	}
+
 	for _, off := range []int64{0, 4 << 20} {
 		if _, err := f.WriteAt(block, off); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	if err := f.Truncate(size); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +264,9 @@ func TestDockerPrepareKeepsSparse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = d.Close() }()
+
 	ctx := context.Background()
 	if err := d.Prepare(ctx, HostDirs{Root: t.TempDir(), Work: work, Home: t.TempDir()}); err != nil {
 		t.Fatal(err)
@@ -237,10 +276,12 @@ func TestDockerPrepareKeepsSparse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
+
 	blocks, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 	if err != nil {
 		t.Fatalf("parse stat output %q: %v", out, err)
 	}
+
 	if blocks*512 >= size/10 {
 		t.Fatalf("copy-in densified the sparse file: %d blocks", blocks)
 	}

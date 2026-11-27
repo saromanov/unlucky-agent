@@ -40,6 +40,7 @@ type Report struct {
 // New builds a report from results.
 func New(id, version, baselineName string, started time.Time, results []runner.Result) *Report {
 	sort.Slice(results, func(i, j int) bool { return results[i].ScenarioID < results[j].ScenarioID })
+
 	return &Report{
 		Schema: Schema,
 		Run: Run{
@@ -62,7 +63,9 @@ func WriteJSON(path string, r *Report) error {
 	if err != nil {
 		return err
 	}
+
 	data = append(data, '\n')
+
 	return os.WriteFile(path, data, 0o644)
 }
 
@@ -119,6 +122,7 @@ var mdTemplate = template.Must(template.New("md").Funcs(template.FuncMap{
 
 type mdData struct {
 	*Report
+
 	Summary       string
 	MetaDefects   []string
 	RecoveryPaths []string
@@ -149,6 +153,7 @@ func WriteMarkdown(w io.Writer, r *Report) error {
 		RecoveryPaths: recoveryPaths(r),
 		Cost:          costRows(r),
 	}
+
 	return mdTemplate.Execute(w, data)
 }
 
@@ -156,11 +161,13 @@ func WriteMarkdown(w io.Writer, r *Report) error {
 // cost data. Results are already sorted by scenario id.
 func costRows(r *Report) []CostRow {
 	var out []CostRow
+
 	for _, res := range r.Results {
 		tool := toolCallTimes(res.Steps)
 		if len(res.CheckpointTimesUS) == 0 && len(tool) == 0 {
 			continue
 		}
+
 		out = append(out, CostRow{
 			ScenarioID:      res.ScenarioID,
 			Checkpoints:     len(res.CheckpointTimesUS),
@@ -175,16 +182,19 @@ func costRows(r *Report) []CostRow {
 			PeakDisk:        res.PeakDiskBytes,
 		})
 	}
+
 	return out
 }
 
 func toolCallTimes(steps []runner.StepTiming) []int64 {
 	var out []int64
+
 	for _, s := range steps {
 		if s.Kind == "toolcall" {
 			out = append(out, s.US)
 		}
 	}
+
 	return out
 }
 
@@ -195,6 +205,7 @@ func maxSnapshot(values []int64) int64 {
 			maxValue = v
 		}
 	}
+
 	return maxValue
 }
 
@@ -204,6 +215,7 @@ func humanDuration(us int64) string {
 	if us < 1000 {
 		return fmt.Sprintf("%d µs", us)
 	}
+
 	return fmt.Sprintf("%.1f ms", float64(us)/1000)
 }
 
@@ -213,13 +225,17 @@ func humanBytes(n int64) string {
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
+
 	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
 	value := float64(n)
+
 	idx := -1
+
 	for value >= unit && idx < len(units)-1 {
 		value /= unit
 		idx++
 	}
+
 	return fmt.Sprintf("%.2f %s", value, units[idx])
 }
 
@@ -229,36 +245,44 @@ func firstSentence(note string) string {
 	if i := strings.Index(note, ";"); i >= 0 {
 		note = strings.TrimSpace(note[:i])
 	}
+
 	const limit = 120
 	if r := []rune(note); len(r) > limit {
 		note = string(r[:limit-3]) + "..."
 	}
+
 	return note
 }
 
 // metaDefects lists every metadata divergence of the run, one line each.
 func metaDefects(r *Report) []string {
 	var out []string
+
 	for _, res := range r.Results {
 		if res.Diff == nil {
 			continue
 		}
+
 		for _, c := range res.Diff.Meta {
 			out = append(out, fmt.Sprintf("%s %s: %s", res.ScenarioID, c.Path, c.Detail))
 		}
 	}
+
 	return out
 }
 
 // recoveryPaths lists every failure that still leaves a way back.
 func recoveryPaths(r *Report) []string {
 	var out []string
+
 	for _, res := range r.Results {
 		if res.RecoveryPath == "" {
 			continue
 		}
+
 		out = append(out, fmt.Sprintf("%s (%s): %s", res.ScenarioID, res.Verdict, res.RecoveryPath))
 	}
+
 	return out
 }
 
@@ -267,14 +291,18 @@ func summarize(r *Report) string {
 	for _, res := range r.Results {
 		counts[res.Verdict]++
 	}
+
 	keys := make([]string, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
 	}
+
 	sort.Strings(keys)
+
 	var parts []string
 	for _, k := range keys {
 		parts = append(parts, fmt.Sprintf("%s: %d", k, counts[k]))
 	}
+
 	return strings.Join(parts, ", ")
 }

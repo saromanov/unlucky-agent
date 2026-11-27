@@ -11,11 +11,15 @@ import (
 
 func renderMarkdown(t *testing.T, results []runner.Result) string {
 	t.Helper()
+
 	r := New("run", "test", "cp-r", time.Now(), results)
+
 	var buf bytes.Buffer
+
 	if err := WriteMarkdown(&buf, r); err != nil {
 		t.Fatal(err)
 	}
+
 	return buf.String()
 }
 
@@ -29,9 +33,11 @@ func TestRecoveryPathsSection(t *testing.T) {
 	if !strings.Contains(out, "## Recovery paths") {
 		t.Fatalf("the section must be rendered:\n%s", out)
 	}
+
 	if !strings.Contains(out, "- S17 (ERROR): the checkpoint failed; no restore point exists") {
 		t.Fatalf("the entry must carry the verdict and the path:\n%s", out)
 	}
+
 	if strings.Index(out, "## Recovery paths") > strings.Index(out, "## Summary") {
 		t.Fatalf("the section must precede the summary:\n%s", out)
 	}
@@ -62,10 +68,12 @@ func TestCostSection(t *testing.T) {
 	if !strings.Contains(out, "## Cost") {
 		t.Fatalf("the cost section must be rendered:\n%s", out)
 	}
+
 	want := "| S19 | 5 | 30.0 ms | 50.0 ms | 1234.0 ms | 2 | 700 µs | 900 µs | 1.00 GiB | 2.00 MiB | 2.00 GiB |"
 	if !strings.Contains(out, want) {
 		t.Fatalf("the cost row must carry the series, want %q:\n%s", want, out)
 	}
+
 	if strings.Index(out, "## Cost") > strings.Index(out, "## Summary") {
 		t.Fatalf("the cost section must precede the summary:\n%s", out)
 	}

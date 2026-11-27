@@ -25,25 +25,32 @@ const canaryFileName = ".unlucky-agent-canary"
 // skipped: the canary protects, it does not fail the run on setup.
 func NewCanary(dirs []string) (*Canary, error) {
 	c := &Canary{files: map[string]string{}}
+
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
 	}
+
 	for _, dir := range dirs {
 		p := filepath.Join(dir, canaryFileName)
 		if err := os.WriteFile(p, buf, 0o644); err != nil {
 			continue
 		}
+
 		sum, err := fileHash(p)
 		if err != nil {
 			os.Remove(p)
+
 			return nil, fmt.Errorf("canary: %w", err)
 		}
+
 		c.files[p] = sum
 	}
+
 	if len(c.files) == 0 {
 		return nil, fmt.Errorf("canary: no marker could be written in %v", dirs)
 	}
+
 	return c, nil
 }
 
@@ -51,20 +58,24 @@ func NewCanary(dirs []string) (*Canary, error) {
 // prefixed with CANARY_FAILED so the report names the failure class.
 func (c *Canary) Verify() error {
 	var fails []string
+
 	for p, want := range c.files {
 		got, err := fileHash(p)
+
 		switch {
 		case os.IsNotExist(err):
-			fails = append(fails, fmt.Sprintf("missing %s", p))
+			fails = append(fails, "missing "+p)
 		case err != nil:
 			fails = append(fails, fmt.Sprintf("unreadable %s: %v", p, err))
 		case got != want:
-			fails = append(fails, fmt.Sprintf("changed %s", p))
+			fails = append(fails, "changed "+p)
 		}
 	}
+
 	if len(fails) > 0 {
 		return fmt.Errorf("%s: %s", CanaryMarker, join(fails, "; "))
 	}
+
 	return nil
 }
 
@@ -81,7 +92,9 @@ func (c *Canary) Paths() []string {
 	for p := range c.files {
 		out = append(out, p)
 	}
+
 	sort.Strings(out)
+
 	return out
 }
 
@@ -90,6 +103,8 @@ func fileHash(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	sum := sha256.Sum256(b)
+
 	return hex.EncodeToString(sum[:]), nil
 }

@@ -18,6 +18,7 @@ import (
 
 func needGit(t *testing.T) {
 	t.Helper()
+
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}
@@ -35,6 +36,7 @@ func TestProjectGitDirty(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
 	work := filepath.Join(root, "work")
+
 	home := filepath.Join(root, "home")
 	if err := Build("project_git_dirty", 42, work, home); err != nil {
 		t.Fatal(err)
@@ -44,6 +46,7 @@ func TestProjectGitDirty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.HasSuffix(string(util), "// local uncommitted edit\n") {
 		t.Fatalf("util.go must keep the unstaged local edit, got %q", util)
 	}
@@ -52,6 +55,7 @@ func TestProjectGitDirty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if !strings.Contains(string(main), "demo, edited") {
 		t.Fatalf("main.go must carry the staged edit, got %q", main)
 	}
@@ -64,14 +68,17 @@ func TestProjectGitDirty(t *testing.T) {
 	// output shows only the staged and unstaged edits.
 	cmd := exec.Command("git", "status", "--porcelain", "-uno")
 	cmd.Dir = work
+
 	cmd.Env = append(os.Environ(),
 		"HOME="+home,
 		"GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"),
 	)
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git status: %v: %s", err, out)
 	}
+
 	want := "A  src/extra.go\nM  src/main.go\n M src/util.go\n"
 	if string(out) != want {
 		t.Fatalf("git status mismatch:\n got %q\nwant %q", out, want)
@@ -80,6 +87,7 @@ func TestProjectGitDirty(t *testing.T) {
 
 func TestProjectGitShadow(t *testing.T) {
 	needGit(t)
+
 	work := buildFixture(t, "project_git_shadow")
 	for _, rel := range []string{
 		".git/HEAD",
@@ -99,32 +107,41 @@ func buildFixture(t *testing.T, name string) string {
 	t.Helper()
 	root := t.TempDir()
 	work := filepath.Join(root, "work")
+
 	home := filepath.Join(root, "home")
 	if err := Build(name, 42, work, home); err != nil {
 		t.Fatalf("build %s: %v", name, err)
 	}
+
 	return work
 }
 
 func captureEntries(t *testing.T, work string) []manifest.Entry {
 	t.Helper()
+
 	var buf bytes.Buffer
 	if _, err := manifest.Capture([]manifest.Root{{Name: "work", Dir: work}}, &buf); err != nil {
 		t.Fatal(err)
 	}
+
 	dec := json.NewDecoder(&buf)
+
 	var hdr manifest.Header
 	if err := dec.Decode(&hdr); err != nil {
 		t.Fatal(err)
 	}
+
 	var out []manifest.Entry
+
 	for dec.More() {
 		var e manifest.Entry
 		if err := dec.Decode(&e); err != nil {
 			t.Fatal(err)
 		}
+
 		out = append(out, e)
 	}
+
 	return out
 }
 
@@ -132,6 +149,7 @@ func captureEntries(t *testing.T, work string) []manifest.Entry {
 // builds can be compared for determinism.
 func normalizeManifest(entries []manifest.Entry) []manifest.Entry {
 	out := make([]manifest.Entry, len(entries))
+
 	for i, e := range entries {
 		e.MtimeNS = 0
 		e.UID = 0
@@ -139,12 +157,14 @@ func normalizeManifest(entries []manifest.Entry) []manifest.Entry {
 		e.Blocks = 0
 		out[i] = e
 	}
+
 	return out
 }
 
 func assertDeterministic(t *testing.T, name string) {
 	t.Helper()
 	a := normalizeManifest(captureEntries(t, buildFixture(t, name)))
+
 	b := normalizeManifest(captureEntries(t, buildFixture(t, name)))
 	if !reflect.DeepEqual(a, b) {
 		t.Fatalf("%s fixture is not deterministic: %d vs %d entries", name, len(a), len(b))
@@ -156,6 +176,7 @@ func entriesByPath(entries []manifest.Entry) map[string]manifest.Entry {
 	for _, e := range entries {
 		out[e.Path] = e
 	}
+
 	return out
 }
 
@@ -168,6 +189,7 @@ func TestSpecialFiles(t *testing.T) {
 		mode uint32
 		typ  string
 	}
+
 	for _, w := range []want{
 		{"work/spec/ro.txt", 0o400, "file"},
 		{"work/spec/rwx.sh", 0o755, "file"},
@@ -180,9 +202,11 @@ func TestSpecialFiles(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s is missing from the manifest", w.path)
 		}
+
 		if e.Type != w.typ {
 			t.Fatalf("%s type=%s, want %s", w.path, e.Type, w.typ)
 		}
+
 		if w.mode != 0 && e.Mode != w.mode {
 			t.Fatalf("%s mode=%04o, want %04o", w.path, e.Mode, w.mode)
 		}
@@ -198,6 +222,7 @@ func TestSpecialFiles(t *testing.T) {
 		if !ok || e.Type != "symlink" {
 			t.Fatalf("%s must be a symlink: %+v", link, e)
 		}
+
 		if e.Link != target {
 			t.Fatalf("%s -> %q, want %q", link, e.Link, target)
 		}
@@ -207,12 +232,15 @@ func TestSpecialFiles(t *testing.T) {
 	if err := syscall.Lstat(filepath.Join(work, "spec", "hard_a"), &hardA); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := syscall.Lstat(filepath.Join(work, "spec", "hard_b"), &hardB); err != nil {
 		t.Fatal(err)
 	}
+
 	if hardA.Nlink != 2 || hardB.Nlink != 2 {
 		t.Fatalf("hardlink nlink=%d/%d, want 2/2", hardA.Nlink, hardB.Nlink)
 	}
+
 	if hardA.Ino != hardB.Ino {
 		t.Fatalf("hard_a and hard_b must share an inode")
 	}
@@ -222,6 +250,7 @@ func TestSpecialFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if !info.ModTime().Equal(FixedMtime) {
 			t.Fatalf("%s mtime=%v, want %v", rel, info.ModTime(), FixedMtime)
 		}
@@ -261,17 +290,21 @@ func TestPathEdges(t *testing.T) {
 
 	many := 0
 	longest := ""
+
 	for _, e := range entries {
 		if strings.HasPrefix(e.Path, "work/edge/many/") && e.Type == "file" {
 			many++
 		}
+
 		if e.Type == "file" && len(e.Path) > len(longest) {
 			longest = e.Path
 		}
 	}
+
 	if many != manyFiles {
 		t.Fatalf("edge/many holds %d files, want %d", many, manyFiles)
 	}
+
 	if len(longest) < 3000 || len(longest) >= 4096 {
 		t.Fatalf("deepest path length %d is outside [3000, 4096)", len(longest))
 	}
@@ -283,6 +316,7 @@ func TestLargeFiles(t *testing.T) {
 	if os.Getenv("UNLUCKY_BIG_TESTS") != "1" {
 		t.Skip("set UNLUCKY_BIG_TESTS=1")
 	}
+
 	work := buildFixture(t, "large_files")
 	byPath := entriesByPath(captureEntries(t, work))
 
@@ -290,6 +324,7 @@ func TestLargeFiles(t *testing.T) {
 	if !ok || regular.Size != largeFileSize {
 		t.Fatalf("regular.bin size=%d, want %d", regular.Size, largeFileSize)
 	}
+
 	if regular.Blocks*512 < largeFileSize/2 {
 		t.Fatalf("regular.bin is not dense: %d blocks", regular.Blocks)
 	}
@@ -298,6 +333,7 @@ func TestLargeFiles(t *testing.T) {
 	if !ok || sparse.Size != largeFileSize {
 		t.Fatalf("sparse.bin size=%d, want %d", sparse.Size, largeFileSize)
 	}
+
 	if sparse.Blocks*512 >= largeFileSize/10 {
 		t.Fatalf("sparse.bin has no real holes: %d blocks", sparse.Blocks)
 	}
@@ -310,25 +346,33 @@ const bigTreeContentBytes = (1 << 30) * 12 / 10
 
 func TestBigTreeLayout(t *testing.T) {
 	seen := make(map[string]struct{}, bigTreeFiles)
+
 	var total int64
-	for i := 0; i < bigTreeFiles; i++ {
+
+	for i := range bigTreeFiles {
 		p := bigTreePath(i)
+
 		dir, name := filepath.Split(p)
 		if !strings.HasPrefix(name, "f") || !strings.HasSuffix(name, ".txt") {
 			t.Fatalf("file %d name=%q", i, name)
 		}
+
 		if depth := len(strings.Split(strings.Trim(dir, "/"), "/")); depth != 8 {
 			t.Fatalf("file %d sits at depth %d, want 8: %s", i, depth, p)
 		}
+
 		if _, ok := seen[p]; ok {
 			t.Fatalf("duplicate path %q", p)
 		}
+
 		seen[p] = struct{}{}
 		total += bigTreeFileSize
 	}
+
 	if len(seen) != bigTreeFiles {
 		t.Fatalf("layout holds %d files, want %d", len(seen), bigTreeFiles)
 	}
+
 	if diff := total - bigTreeContentBytes; diff < -bigTreeContentBytes/100 || diff > bigTreeContentBytes/100 {
 		t.Fatalf("content size %d is not within 1%% of %d", total, bigTreeContentBytes)
 	}
@@ -338,31 +382,42 @@ func TestBigTree(t *testing.T) {
 	if os.Getenv("UNLUCKY_BIG_TESTS") != "1" {
 		t.Skip("set UNLUCKY_BIG_TESTS=1")
 	}
+
 	work := buildFixture(t, "big_tree")
 	entries := captureEntries(t, work)
 
-	var files int
-	var total int64
+	var (
+		files int
+		total int64
+	)
+
 	for _, e := range entries {
 		if e.Type != "file" || !strings.HasPrefix(e.Path, "work/tree/") {
 			continue
 		}
+
 		files++
+
 		total += e.Size
+
 		if depth := len(strings.Split(e.Path, "/")) - 2; depth != 8 {
 			t.Fatalf("%s sits at depth %d, want 8", e.Path, depth)
 		}
 	}
+
 	if files != bigTreeFiles {
 		t.Fatalf("fixture holds %d files, want %d", files, bigTreeFiles)
 	}
+
 	if diff := total - bigTreeContentBytes; diff < -bigTreeContentBytes/100 || diff > bigTreeContentBytes/100 {
 		t.Fatalf("content size %d is not within 1%% of %d", total, bigTreeContentBytes)
 	}
 
 	other := buildFixture(t, "big_tree")
+
 	for _, i := range []int{0, 1, 499, bigTreeFiles / 2, bigTreeFiles - 1} {
 		a := fileHash(t, filepath.Join(work, filepath.FromSlash(bigTreePath(i))))
+
 		b := fileHash(t, filepath.Join(other, filepath.FromSlash(bigTreePath(i))))
 		if a != b {
 			t.Fatalf("file %d differs between builds: %s vs %s", i, a, b)
@@ -372,10 +427,13 @@ func TestBigTree(t *testing.T) {
 
 func fileHash(t *testing.T, path string) string {
 	t.Helper()
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	sum := sha256.Sum256(data)
+
 	return hex.EncodeToString(sum[:])
 }

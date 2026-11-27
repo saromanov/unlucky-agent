@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -32,11 +33,14 @@ func main() {
 func run(args []string) error {
 	if len(args) == 0 {
 		usage()
-		return fmt.Errorf("no command given")
+
+		return errors.New("no command given")
 	}
+
 	switch args[0] {
 	case "version":
 		fmt.Println(version)
+
 		return nil
 	case "scenarios":
 		return cmdScenarios(args[1:])
@@ -48,12 +52,15 @@ func run(args []string) error {
 		return cmdRun(args[1:])
 	case "baselines":
 		fmt.Println(strings.Join(baseline.Names(), "\n"))
+
 		return nil
 	case "help", "-h", "--help":
 		usage()
+
 		return nil
 	default:
 		usage()
+
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
@@ -75,29 +82,38 @@ func usage() {
 
 func cmdScenarios(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("scenarios: expected subcommand list or validate")
+		return errors.New("scenarios: expected subcommand list or validate")
 	}
+
 	fs := flag.NewFlagSet("scenarios", flag.ExitOnError)
+
 	dir := fs.String("dir", "scenarios", "scenario directory")
+
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
+
 	list, err := scenario.LoadDir(*dir)
 	if err != nil {
 		return err
 	}
+
 	switch args[0] {
 	case "list":
 		for _, s := range list {
 			fmt.Printf("%s  %-10s %-14s %s\n", s.ID, s.Group, s.Tiers, s.Title)
 		}
+
 		fmt.Printf("total: %d\n", len(list))
+
 		return nil
 	case "validate":
 		for _, s := range list {
 			fmt.Printf("%s ok\n", s.ID)
 		}
+
 		fmt.Printf("valid scenarios: %d\n", len(list))
+
 		return nil
 	default:
 		return fmt.Errorf("scenarios: unknown subcommand %q", args[0])
@@ -108,33 +124,45 @@ func cmdManifest(args []string) error {
 	fs := flag.NewFlagSet("manifest", flag.ExitOnError)
 	root := fs.String("root", "", "tree root")
 	name := fs.String("name", "work", "root name in the manifest")
+
 	out := fs.String("o", "", "output file")
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
 	if *root == "" || *out == "" {
-		return fmt.Errorf("manifest: -root and -o are required")
+		return errors.New("manifest: -root and -o are required")
 	}
+
 	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
 		return err
 	}
+
 	tmp := *out + ".tmp"
+
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
+
 	stats, err := manifest.Capture([]manifest.Root{{Name: *name, Dir: *root}}, f)
 	if err != nil {
 		f.Close()
+
 		return err
 	}
+
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Rename(tmp, *out); err != nil {
 		return err
 	}
+
 	fmt.Printf("%s: %d entries, %d bytes\n", *out, stats.Entries, stats.Bytes)
+
 	return nil
 }
 
@@ -143,6 +171,7 @@ type globList []string
 func (g *globList) String() string { return strings.Join(*g, ",") }
 func (g *globList) Set(v string) error {
 	*g = append(*g, v)
+
 	return nil
 }
 
@@ -151,31 +180,42 @@ func cmdDiff(args []string) error {
 	base := fs.String("base", "", "expected-state manifest")
 	obs := fs.String("observed", "", "observed-state manifest")
 	require := fs.String("require", "content", "content or meta")
+
 	var exclude globList
+
 	fs.Var(&exclude, "exclude", "exclusion glob (repeatable)")
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
 	if *base == "" || *obs == "" {
-		return fmt.Errorf("diff: -base and -observed are required")
+		return errors.New("diff: -base and -observed are required")
 	}
+
 	pol := oracle.Policy{Exclude: exclude, RequireMeta: *require == "meta"}
+
 	res, err := oracle.DiffFiles(*base, *obs, pol)
 	if err != nil {
 		return err
 	}
+
 	fmt.Printf("expected=%d matched=%d recall=%.3f meta=%.3f\n",
 		res.Expected, res.Matched, res.Recall(), res.MetaScore())
 	printChanges("missing", res.Missing)
 	printChanges("changed", res.Changed)
 	printChanges("meta", res.Meta)
 	printChanges("added", res.Added)
+
 	if res.Pass() {
 		fmt.Println("verdict: PASS")
+
 		return nil
 	}
+
 	fmt.Println("verdict: FAIL")
-	return fmt.Errorf("hard gates not passed")
+
+	return errors.New("hard gates not passed")
 }
 
 func printChanges(kind string, changes []oracle.Change) {
@@ -198,42 +238,50 @@ func cmdRun(args []string) error {
 	sandboxMode := fs.String("sandbox", "local", "sandbox driver: local, docker or incus")
 	image := fs.String("image", sandbox.DefaultImage, "sandbox image (docker driver)")
 	incusImage := fs.String("incus-image", sandbox.DefaultIncusImage, "sandbox image (incus driver)")
+
 	memory := fs.Int("memory", sandbox.DefaultMemoryMB, "sandbox memory floor in MB (container drivers, scenarios may raise it)")
+
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
 	switch *sandboxMode {
 	case "local", "docker", "incus":
 	default:
 		return fmt.Errorf("run: unknown sandbox %q", *sandboxMode)
 	}
+
 	if *repeat < 1 {
-		return fmt.Errorf("run: -repeat must be >= 1")
+		return errors.New("run: -repeat must be >= 1")
 	}
 	// The tar baseline runs GNU tar against the host staging tree.
 	if *sandboxMode != "local" && *baselineName == "tar" {
-		return fmt.Errorf("baseline tar is host-only, use local sandbox or cp-r")
+		return errors.New("baseline tar is host-only, use local sandbox or cp-r")
 	}
+
 	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		return err
 	}
 
 	var scenarios []*scenario.Scenario
+
 	switch {
 	case *all:
 		list, err := scenario.LoadDir(*dir)
 		if err != nil {
 			return err
 		}
+
 		scenarios = list
 	case *scenarioPath != "":
 		s, err := scenario.Load(*scenarioPath)
 		if err != nil {
 			return err
 		}
+
 		scenarios = []*scenario.Scenario{s}
 	default:
-		return fmt.Errorf("run: -scenario or -all is required")
+		return errors.New("run: -scenario or -all is required")
 	}
 
 	started := time.Now()
@@ -243,23 +291,30 @@ func cmdRun(args []string) error {
 
 	// The canary guards host directories the sandbox must never write to.
 	var can *sandbox.Canary
+
 	if containerMode {
 		dirs := []string{os.TempDir(), *outDir}
 		if home, err := os.UserHomeDir(); err == nil {
 			dirs = append(dirs, home)
 		}
+
 		var err error
+
 		can, err = sandbox.NewCanary(dirs)
 		if err != nil {
 			return err
 		}
+
 		defer can.Close()
+
 		fmt.Printf("canary: %d markers\n", len(can.Paths()))
 	}
 
 	results := make([]runner.Result, 0, len(scenarios))
+
 	for _, s := range scenarios {
 		runs := make([]*runner.Result, 0, *repeat)
+
 		for range *repeat {
 			cfg := runner.Config{
 				Scenario:   s,
@@ -269,6 +324,7 @@ func cmdRun(args []string) error {
 				Keep:       *keep,
 				Timeout:    *timeout,
 			}
+
 			if dockerMode {
 				// The tmpfs sizes follow the scenario resources: a fixture must
 				// fit in work, and scratch must hold its snapshot archive. The
@@ -284,8 +340,10 @@ func cmdRun(args []string) error {
 				if err != nil {
 					return err
 				}
+
 				cfg.Driver = drv
 			}
+
 			if incusMode {
 				drv, err := sandbox.NewIncus(sandbox.IncusConfig{
 					Image:         *incusImage,
@@ -297,39 +355,52 @@ func cmdRun(args []string) error {
 				if err != nil {
 					return err
 				}
+
 				cfg.Driver = drv
 			}
+
 			res, err := runner.Run(context.Background(), cfg)
 			if err != nil {
 				return fmt.Errorf("%s: %w", s.ID, err)
 			}
+
 			runs = append(runs, res)
 		}
+
 		res := runner.Aggregate(runs)
 		fmt.Printf("%s %-4s sandbox=%s recall=%.3f meta=%.3f clobbered=%d %s\n",
 			res.ScenarioID, res.Verdict, res.Sandbox, res.Recall, res.MetaScore, res.Clobbered, res.Reason)
+
 		results = append(results, *res)
 	}
 
 	rep := report.New(fmt.Sprintf("run-%d", started.Unix()), version, *baselineName, started, results)
+
 	jsonPath := filepath.Join(*outDir, "report.json")
+
 	if err := report.WriteJSON(jsonPath, rep); err != nil {
 		return err
 	}
+
 	mdPath := filepath.Join(*outDir, "report.md")
+
 	mf, err := os.Create(mdPath)
 	if err != nil {
 		return err
 	}
+
 	defer mf.Close()
+
 	if err := report.WriteMarkdown(mf, rep); err != nil {
 		return err
 	}
+
 	fmt.Printf("report: %s, %s\n", jsonPath, mdPath)
 
 	if can != nil {
 		if err := can.Verify(); err != nil {
 			fmt.Fprintln(os.Stderr, "unlucky-agent:", err)
+
 			return err
 		}
 	}
@@ -339,5 +410,6 @@ func cmdRun(args []string) error {
 			return fmt.Errorf("run %s finished with ERROR: %s", r.ScenarioID, r.Reason)
 		}
 	}
+
 	return nil
 }

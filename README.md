@@ -1,5 +1,7 @@
 # unlucky-agent
 
+[![CI](https://github.com/saromanov/unlucky-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/saromanov/unlucky-agent/actions/workflows/ci.yml) [![Go Reference](https://pkg.go.dev/badge.svg)](https://pkg.go.dev/github.com/saromanov/unlucky-agent/cmd) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Go Report Card](https://goreportcard.com/badge/github.com/saromanov/unlucky-agent)](https://goreportcard.com/report/github.com/saromanov/unlucky-agent)
+
 A reproducible crash-test bench for rollback tools that protect a working directory from
 destructive actions of AI coding agents.
 

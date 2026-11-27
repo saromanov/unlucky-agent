@@ -32,6 +32,7 @@ func TestPolicyExcluded(t *testing.T) {
 	if !p.Excluded("work/.git/index") {
 		t.Error("work/.git/index must be excluded")
 	}
+
 	if p.Excluded("work/src/main.go") {
 		t.Error("work/src/main.go must not be excluded")
 	}

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/saromanov/unlucky-agent/internal/manifest"
@@ -104,16 +105,24 @@ func GuardFailure(checks []string) error {
 	if len(checks) == 0 {
 		return nil
 	}
+
 	return fmt.Errorf("%w: %s", ErrGuardFailed, join(checks, "; "))
 }
 
 func join(parts []string, sep string) string {
 	out := ""
+
+	var outSb112 strings.Builder
+
 	for i, p := range parts {
 		if i > 0 {
-			out += sep
+			outSb112.WriteString(sep)
 		}
-		out += p
+
+		outSb112.WriteString(p)
 	}
+
+	out += outSb112.String()
+
 	return out
 }

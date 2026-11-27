@@ -4,3 +4,4 @@ dist/
 *.jsonl
 *.tmp
 .DS_Store
+coverage.out

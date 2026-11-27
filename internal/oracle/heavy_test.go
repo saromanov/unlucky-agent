@@ -31,13 +31,16 @@ func heavyChanged(i int) bool { return i%heavyChangedEvery == 0 && !heavyDropped
 
 func writeHeavyManifest(t *testing.T, path string, observed bool) {
 	t.Helper()
+
 	f, err := os.Create(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	bw := bufio.NewWriterSize(f, 1<<20)
 	enc := json.NewEncoder(bw)
 	enc.SetEscapeHTML(false)
+
 	hdr := manifest.Header{
 		Manifest: 1,
 		Schema:   manifest.Schema,
@@ -47,12 +50,15 @@ func writeHeavyManifest(t *testing.T, path string, observed bool) {
 	}
 	if err := enc.Encode(hdr); err != nil {
 		_ = f.Close()
+
 		t.Fatal(err)
 	}
+
 	for i := range heavyEntries {
 		if observed && heavyDropped(i) {
 			continue
 		}
+
 		e := manifest.Entry{
 			Root:    "work",
 			Path:    heavyPath(i),
@@ -69,11 +75,14 @@ func writeHeavyManifest(t *testing.T, path string, observed bool) {
 		if observed && heavyChanged(i) {
 			e.Hash = "changed"
 		}
+
 		if err := enc.Encode(e); err != nil {
 			_ = f.Close()
+
 			t.Fatal(err)
 		}
 	}
+
 	if observed {
 		for i := range heavyAdded {
 			e := manifest.Entry{
@@ -90,14 +99,18 @@ func writeHeavyManifest(t *testing.T, path string, observed bool) {
 			}
 			if err := enc.Encode(e); err != nil {
 				_ = f.Close()
+
 				t.Fatal(err)
 			}
 		}
 	}
+
 	if err := bw.Flush(); err != nil {
 		_ = f.Close()
+
 		t.Fatal(err)
 	}
+
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -111,24 +124,32 @@ func TestHeavyDiff(t *testing.T) {
 	dir := t.TempDir()
 	basePath := filepath.Join(dir, "base.jsonl")
 	obsPath := filepath.Join(dir, "observed.jsonl")
+
 	writeHeavyManifest(t, basePath, false)
 	writeHeavyManifest(t, obsPath, true)
 
 	var peak uint64
+
 	stop := make(chan struct{})
 	done := make(chan struct{})
+
 	runtime.GC()
+
 	go func() {
 		defer close(done)
+
 		tick := time.NewTicker(10 * time.Millisecond)
 		defer tick.Stop()
+
 		var ms runtime.MemStats
+
 		for {
 			select {
 			case <-stop:
 				return
 			case <-tick.C:
 				runtime.ReadMemStats(&ms)
+
 				if ms.HeapAlloc > peak {
 					peak = ms.HeapAlloc
 				}
@@ -138,11 +159,14 @@ func TestHeavyDiff(t *testing.T) {
 
 	start := time.Now()
 	res, err := DiffFiles(basePath, obsPath, Policy{})
+
 	close(stop)
 	<-done
+
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	t.Logf("peak heap %d MiB over %s", peak>>20, time.Since(start))
 
 	if peak >= heavyHeapLimit {
@@ -150,6 +174,7 @@ func TestHeavyDiff(t *testing.T) {
 	}
 
 	missing, changed := 0, 0
+
 	for i := range heavyEntries {
 		switch {
 		case heavyDropped(i):
@@ -158,21 +183,27 @@ func TestHeavyDiff(t *testing.T) {
 			changed++
 		}
 	}
+
 	if res.Expected != heavyEntries {
 		t.Fatalf("expected=%d, want %d", res.Expected, heavyEntries)
 	}
+
 	if len(res.Missing) != missing {
 		t.Fatalf("missing=%d, want %d", len(res.Missing), missing)
 	}
+
 	if len(res.Changed) != changed {
 		t.Fatalf("changed=%d, want %d", len(res.Changed), changed)
 	}
+
 	if len(res.Added) != heavyAdded {
 		t.Fatalf("added=%d, want %d", len(res.Added), heavyAdded)
 	}
+
 	if res.Matched != heavyEntries-missing-changed {
 		t.Fatalf("matched=%d, want %d", res.Matched, heavyEntries-missing-changed)
 	}
+
 	if res.Skipped != 0 || len(res.Meta) != 0 {
 		t.Fatalf("unexpected skipped=%d meta=%d", res.Skipped, len(res.Meta))
 	}

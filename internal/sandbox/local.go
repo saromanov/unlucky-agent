@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,10 +31,12 @@ func (l *Local) Name() string { return "local" }
 // Prepare records the fixture staging tree as the execution target.
 func (l *Local) Prepare(_ context.Context, host HostDirs) error {
 	if host.Work == "" || host.Home == "" {
-		return fmt.Errorf("sandbox local: work and home must be set")
+		return errors.New("sandbox local: work and home must be set")
 	}
+
 	l.work = host.Work
 	l.home = host.Home
+
 	return nil
 }
 
@@ -54,13 +57,16 @@ func (l *Local) env() []string {
 func (l *Local) Exec(ctx context.Context, script string, timeout time.Duration) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	cmd := execCommandContext(cctx, "sh", "-c", script)
 	cmd.Dir = l.work
 	cmd.Env = l.env()
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("%w: %s", err, out)
 	}
+
 	return out, nil
 }
 
@@ -69,31 +75,46 @@ func (l *Local) Exec(ctx context.Context, script string, timeout time.Duration) 
 func (l *Local) ExecInterrupt(ctx context.Context, script string, timeout, killAfter time.Duration) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	cmd := execCommandContext(cctx, "sh", "-c", script)
 	cmd.Dir = l.work
 	cmd.Env = l.env()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	var out bytes.Buffer
+
 	cmd.Stdout = &out
+
 	cmd.Stderr = &out
+
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+
 	done := make(chan error, 1)
+
 	go func() { done <- cmd.Wait() }()
 
 	start := time.Now()
+
 	timer := time.NewTimer(killAfter)
 	defer timer.Stop()
+
 	select {
 	case err := <-done:
 		if err != nil {
 			return out.Bytes(), fmt.Errorf("%w: %s", err, out.Bytes())
 		}
+
 		return out.Bytes(), nil
 	case <-timer.C:
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-done
+
+		if waitErr := <-done; waitErr != nil {
+			return out.Bytes(), fmt.Errorf("%w: restore interrupted with SIGKILL after %d ms: %w",
+				ErrInterrupted, time.Since(start).Milliseconds(), waitErr)
+		}
+
 		return out.Bytes(), fmt.Errorf("%w: restore interrupted with SIGKILL after %d ms",
 			ErrInterrupted, time.Since(start).Milliseconds())
 	}
@@ -102,12 +123,14 @@ func (l *Local) ExecInterrupt(ctx context.Context, script string, timeout, killA
 // CaptureRoots returns the live trees: no copy is needed on the host.
 func (l *Local) CaptureRoots(_ string) ([]manifest.Root, func(), error) {
 	if l.work == "" {
-		return nil, nil, fmt.Errorf("sandbox local: Prepare was not called")
+		return nil, nil, errors.New("sandbox local: Prepare was not called")
 	}
+
 	roots := []manifest.Root{
 		{Name: "work", Dir: l.work},
 		{Name: "home", Dir: l.home},
 	}
+
 	return roots, func() {}, nil
 }
 

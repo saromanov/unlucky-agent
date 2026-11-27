@@ -34,10 +34,13 @@ func parseGuard(out string) []string {
 		mounts  []string
 		inMount bool
 	)
+
 	sc := bufio.NewScanner(strings.NewReader(out))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 	for sc.Scan() {
 		line := sc.Text()
+
 		switch {
 		case strings.HasPrefix(line, "uid="):
 			uid = strings.TrimPrefix(line, "uid=")
@@ -53,19 +56,25 @@ func parseGuard(out string) []string {
 			mounts = append(mounts, line)
 		}
 	}
+
 	if sc.Err() != nil {
 		return append(fails, fmt.Sprintf("guard output unreadable: %v", sc.Err()))
 	}
+
 	if uid != guardUIDWant {
 		fails = append(fails, fmt.Sprintf("uid is %q, want %s", uid, guardUIDWant))
 	}
+
 	if home != guardHomeWant {
 		fails = append(fails, fmt.Sprintf("HOME is %q, want %q", home, guardHomeWant))
 	}
+
 	if docker != "yes" {
 		fails = append(fails, "container root marker /.dockerenv not found")
 	}
+
 	fails = append(fails, checkMountinfo(mounts)...)
+
 	return fails
 }
 
@@ -109,10 +118,13 @@ func parseIncusGuard(out string) []string {
 		mounts    []string
 		inMount   bool
 	)
+
 	sc := bufio.NewScanner(strings.NewReader(out))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
 	for sc.Scan() {
 		line := sc.Text()
+
 		switch {
 		case strings.HasPrefix(line, "uid="):
 			uid = strings.TrimPrefix(line, "uid=")
@@ -132,18 +144,23 @@ func parseIncusGuard(out string) []string {
 			mounts = append(mounts, line)
 		}
 	}
+
 	if sc.Err() != nil {
 		return append(fails, fmt.Sprintf("guard output unreadable: %v", sc.Err()))
 	}
+
 	if uid != guardUIDWant {
 		fails = append(fails, fmt.Sprintf("uid is %q, want %s", uid, guardUIDWant))
 	}
+
 	if home != guardHomeWant {
 		fails = append(fails, fmt.Sprintf("HOME is %q, want %q", home, guardHomeWant))
 	}
+
 	fails = append(fails, checkIncusLinks(links, linksSeen)...)
 	fails = append(fails, checkIncusDevIncus(devincus, devSeen)...)
 	fails = append(fails, checkIncusMountinfo(mounts)...)
+
 	return fails
 }
 
@@ -151,6 +168,7 @@ func checkIncusDevIncus(devincus string, seen bool) []string {
 	if !seen {
 		return []string{"guest API socket marker missing"}
 	}
+
 	if devincus != "no" {
 		return []string{
 			"guest API socket /dev/incus present, want absent " +
@@ -165,12 +183,15 @@ func checkIncusLinks(links string, seen bool) []string {
 	if !seen {
 		return []string{"network interface list missing"}
 	}
+
 	var fails []string
-	for _, name := range strings.Fields(links) {
+
+	for name := range strings.FieldsSeq(links) {
 		if name != "lo" {
 			fails = append(fails, fmt.Sprintf("network interface %q present, want lo only", name))
 		}
 	}
+
 	return fails
 }
 
@@ -220,51 +241,66 @@ func checkIncusMountinfo(mounts []string) []string {
 		lxcfs bool
 		types = map[string][]string{}
 	)
+
 	for _, line := range mounts {
-		sep := strings.Index(line, " - ")
-		if sep < 0 {
+		_, after, ok := strings.Cut(line, " - ")
+		if !ok {
 			continue
 		}
+
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
 			continue
 		}
-		rest := strings.Fields(line[sep+3:])
+
+		rest := strings.Fields(after)
 		if len(rest) == 0 {
 			continue
 		}
+
 		mountPoint := fields[4]
+
 		fstype := rest[0]
 		if fstype == "fuse.lxcfs" {
 			lxcfs = true
 		}
+
 		types[mountPoint] = append(types[mountPoint], fstype)
+
 		if fstype == "tmpfs" && !incusTmpfsMounts[mountPoint] {
 			fails = append(fails, fmt.Sprintf("tmpfs mount %q outside sandbox layout", mountPoint))
 		}
+
 		if pseudoFilesystems[fstype] || incusPseudoFilesystems[fstype] {
 			continue
 		}
+
 		if !incusAllowedDiskMounts[mountPoint] {
 			fails = append(fails, fmt.Sprintf("disk-backed mount %q (fstype %s) outside /sandbox/evidence", mountPoint, fstype))
 		}
 	}
+
 	if !lxcfs {
 		fails = append(fails, "container root marker fuse.lxcfs not found")
 	}
+
 	for _, p := range incusTmpfsPaths {
 		got, ok := types[p]
 		if !ok {
 			fails = append(fails, fmt.Sprintf("sandbox path %q is not mounted, want tmpfs", p))
+
 			continue
 		}
+
 		for _, t := range got {
 			if t != "tmpfs" {
 				fails = append(fails, fmt.Sprintf("sandbox path %q is %s, want tmpfs", p, t))
+
 				break
 			}
 		}
 	}
+
 	return fails
 }
 
@@ -273,23 +309,29 @@ func checkIncusMountinfo(mounts []string) []string {
 // and must refuse the run.
 func checkMountinfo(mounts []string) []string {
 	var fails []string
+
 	for _, line := range mounts {
-		sep := strings.Index(line, " - ")
-		if sep < 0 {
+		_, after, ok := strings.Cut(line, " - ")
+		if !ok {
 			continue
 		}
+
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
 			continue
 		}
+
 		mountPoint := fields[4]
-		fstype := strings.Fields(line[sep+3:])[0]
+
+		fstype := strings.Fields(after)[0]
 		if pseudoFilesystems[fstype] {
 			continue
 		}
+
 		if !allowedDiskMounts[mountPoint] {
 			fails = append(fails, fmt.Sprintf("disk-backed mount %q (fstype %s) outside /sandbox/evidence", mountPoint, fstype))
 		}
 	}
+
 	return fails
 }

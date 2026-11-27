@@ -4,6 +4,7 @@ package fixture
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -33,6 +34,7 @@ func Known(name string) bool {
 		"large_files", "special_files", "path_edges", "big_tree":
 		return true
 	}
+
 	return false
 }
 
@@ -41,6 +43,7 @@ func Build(name string, seed int64, work, home string) error {
 	if !Known(name) {
 		return fmt.Errorf("unknown fixture %q", name)
 	}
+
 	for _, d := range []string{work, home} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
@@ -73,11 +76,13 @@ func Build(name string, seed int64, work, home string) error {
 		{".config/app/config.toml", "debug = true\n", 0o600},
 		{".ssh/known_hosts", "example.com ssh-ed25519 AAAA\n", 0o600},
 	}
+
 	for _, f := range files {
 		if err := write(work, f); err != nil {
 			return err
 		}
 	}
+
 	for _, f := range homeFiles {
 		if err := write(home, f); err != nil {
 			return err
@@ -89,16 +94,19 @@ func Build(name string, seed int64, work, home string) error {
 			return err
 		}
 	}
+
 	if name == "project_git_shadow" {
 		if err := buildGitShadow(work, home, files, seed); err != nil {
 			return err
 		}
 	}
+
 	if name == "project_git_dirty" {
 		if err := gitDirty(work, home); err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -111,6 +119,7 @@ func buildGitShadow(work, home string, files []file, seed int64) error {
 			return err
 		}
 	}
+
 	return gitSeed(shadow, home, fmt.Sprintf("shadow seed=%d", seed))
 }
 
@@ -119,6 +128,7 @@ func write(root string, f file) error {
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
+
 	if err := os.WriteFile(full, []byte(f.body), f.mode); err != nil {
 		return err
 	}
@@ -126,6 +136,7 @@ func write(root string, f file) error {
 	if err := os.Chmod(full, f.mode); err != nil {
 		return err
 	}
+
 	return os.Chtimes(full, FixedMtime, FixedMtime)
 }
 
@@ -138,7 +149,9 @@ func gitSeed(dir, home, message string) error {
 	if err := os.WriteFile(gitconfig, []byte("[user]\n\tname = Fixture\n\temail = fixture@example.com\n"), 0o600); err != nil {
 		return err
 	}
+
 	env := gitEnv(home)
+
 	steps := [][]string{
 		{"init", "-q", "-b", "main"},
 		{"add", "README.md", "src/main.go", "src/util.go", "docs/guide.md", "scripts/run.sh", ".gitignore"},
@@ -147,11 +160,14 @@ func gitSeed(dir, home, message string) error {
 	for _, args := range steps {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
+
 		cmd.Env = env
+
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git %v: %w: %s", args, err, out)
 		}
 	}
+
 	return nil
 }
 
@@ -175,10 +191,13 @@ func gitDirty(work, home string) error {
 	args := []string{"add", "src/main.go", "src/extra.go"}
 	cmd := exec.Command("git", args...)
 	cmd.Dir = work
+
 	cmd.Env = gitEnv(home)
+
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git %v: %w: %s", args, err, out)
 	}
+
 	return nil
 }
 
@@ -207,12 +226,15 @@ func buildLargeFiles(work string, seed int64) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+
 	if err := writeDenseFile(filepath.Join(dir, "regular.bin"), seed); err != nil {
 		return err
 	}
+
 	if err := writeSparseFile(filepath.Join(dir, "sparse.bin"), seed); err != nil {
 		return err
 	}
+
 	return fixDirTimes(dir)
 }
 
@@ -223,28 +245,38 @@ func writeDenseFile(path string, seed int64) error {
 	if err != nil {
 		return err
 	}
+
 	buf := make([]byte, denseBufLen)
+
 	sum := sha256.Sum256([]byte(fmt.Sprintf("large_files:%d", seed)))
+
 	for i := 0; i < len(buf); i += len(sum) {
 		copy(buf[i:], sum[:])
 	}
+
 	for off := int64(0); off < largeFileSize; off += denseBufLen {
 		binary.LittleEndian.PutUint64(buf[:8], uint64(off))
+
 		n := int64(denseBufLen)
 		if rest := largeFileSize - off; rest < n {
 			n = rest
 		}
+
 		if _, err := f.Write(buf[:n]); err != nil {
 			f.Close()
+
 			return err
 		}
 	}
+
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Chmod(path, 0o644); err != nil {
 		return err
 	}
+
 	return os.Chtimes(path, FixedMtime, FixedMtime)
 }
 
@@ -255,27 +287,37 @@ func writeSparseFile(path string, seed int64) error {
 	if err != nil {
 		return err
 	}
+
 	block := make([]byte, sparseBlockLen)
+
 	sum := sha256.Sum256([]byte(fmt.Sprintf("large_files:sparse:%d", seed)))
+
 	for i := 0; i < len(block); i += len(sum) {
 		copy(block[i:], sum[:])
 	}
+
 	for _, off := range []int64{0, largeFileSize / 2} {
 		if _, err := f.WriteAt(block, off); err != nil {
 			f.Close()
+
 			return err
 		}
 	}
+
 	if err := f.Truncate(largeFileSize); err != nil {
 		f.Close()
+
 		return err
 	}
+
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Chmod(path, 0o644); err != nil {
 		return err
 	}
+
 	return os.Chtimes(path, FixedMtime, FixedMtime)
 }
 
@@ -285,6 +327,7 @@ func buildSpecialFiles(work string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+
 	for _, f := range []file{
 		{"spec/ro.txt", "read only\n", 0o400},
 		{"spec/rwx.sh", "#!/bin/sh\necho run\n", 0o755},
@@ -314,6 +357,7 @@ func buildSpecialFiles(work string) error {
 		if err := os.Symlink(l.target, p); err != nil {
 			return err
 		}
+
 		if err := chtimesNoFollow(p); err != nil {
 			return err
 		}
@@ -323,6 +367,7 @@ func buildSpecialFiles(work string) error {
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		return err
 	}
+
 	if err := os.Chtimes(fifo, FixedMtime, FixedMtime); err != nil {
 		return err
 	}
@@ -331,6 +376,7 @@ func buildSpecialFiles(work string) error {
 	if err := bindUnixSocket(sock); err != nil {
 		return err
 	}
+
 	if err := os.Chtimes(sock, FixedMtime, FixedMtime); err != nil {
 		return err
 	}
@@ -341,9 +387,11 @@ func buildSpecialFiles(work string) error {
 	if err := os.MkdirAll(sgid, 0o755); err != nil {
 		return err
 	}
+
 	if err := os.Chmod(sgid, 0o755|os.ModeSetgid); err != nil {
 		return err
 	}
+
 	return fixDirTimes(dir)
 }
 
@@ -354,10 +402,13 @@ func bindUnixSocket(path string) error {
 	if err != nil {
 		return err
 	}
+
 	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: path}); err != nil {
 		_ = syscall.Close(fd)
+
 		return fmt.Errorf("bind %s: %w", path, err)
 	}
+
 	return syscall.Close(fd)
 }
 
@@ -367,6 +418,7 @@ func chtimesNoFollow(path string) error {
 		unix.NsecToTimespec(FixedMtime.UnixNano()),
 		unix.NsecToTimespec(FixedMtime.UnixNano()),
 	}
+
 	return unix.UtimesNanoAt(unix.AT_FDCWD, path, ts, unix.AT_SYMLINK_NOFOLLOW)
 }
 
@@ -411,18 +463,22 @@ func buildPathEdges(work string) error {
 	if err := os.MkdirAll(many, 0o755); err != nil {
 		return err
 	}
-	for i := 0; i < manyFiles; i++ {
+
+	for i := range manyFiles {
 		p := filepath.Join(many, fmt.Sprintf("f%06d.txt", i))
 		if err := os.WriteFile(p, []byte(strconv.Itoa(i)+"\n"), 0o644); err != nil {
 			return err
 		}
+
 		if err := os.Chmod(p, 0o644); err != nil {
 			return err
 		}
+
 		if err := os.Chtimes(p, FixedMtime, FixedMtime); err != nil {
 			return err
 		}
 	}
+
 	return fixDirTimes(dir)
 }
 
@@ -430,31 +486,35 @@ func buildPathEdges(work string) error {
 // close to PATH_MAX but still below it.
 func buildDeepChain(root string) error {
 	dir := root
+
 	for level := 0; ; level++ {
 		if deepPathBudget-len(dir)-1 < deepNameLen+8 {
 			break
 		}
+
 		dir = filepath.Join(dir, deepDirName(level))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
+
 		if level > 64 {
-			return fmt.Errorf("deep chain does not fit the path budget")
+			return errors.New("deep chain does not fit the path budget")
 		}
 	}
-	nameLen := deepPathBudget - len(dir) - 1
-	if nameLen > deepNameLen {
-		nameLen = deepNameLen
-	}
+
+	nameLen := min(deepPathBudget-len(dir)-1, deepNameLen)
+
 	if nameLen < 8 {
-		return fmt.Errorf("deep chain leaves no room for a file name")
+		return errors.New("deep chain leaves no room for a file name")
 	}
+
 	return writePath(filepath.Join(dir, "f"+strings.Repeat("y", nameLen-1)))
 }
 
 // deepDirName returns a unique 200-byte directory name.
 func deepDirName(level int) string {
 	stem := fmt.Sprintf("d%04d-", level)
+
 	return stem + strings.Repeat("x", deepNameLen-len(stem))
 }
 
@@ -463,9 +523,11 @@ func writePath(path string) error {
 	if err := os.WriteFile(path, []byte("deep\n"), 0o644); err != nil {
 		return err
 	}
+
 	if err := os.Chmod(path, 0o644); err != nil {
 		return err
 	}
+
 	return os.Chtimes(path, FixedMtime, FixedMtime)
 }
 
@@ -490,12 +552,15 @@ func bigTreeDir(leaf int) string {
 	for _, r := range bigTreeRadix {
 		div *= r
 	}
+
 	parts := make([]string, 0, len(bigTreeRadix)+1)
 	parts = append(parts, "tree")
+
 	for _, r := range bigTreeRadix {
 		div /= r
 		parts = append(parts, fmt.Sprintf("d%d", (leaf/div)%r))
 	}
+
 	return strings.Join(parts, "/")
 }
 
@@ -505,6 +570,7 @@ func bigTreeDir(leaf int) string {
 // from the index alone.
 func bigTreePath(i int) string {
 	name := fmt.Sprintf("f%d.txt", i%bigTreeFanout)
+
 	return bigTreeDir(i/bigTreeFanout) + "/" + name
 }
 
@@ -516,19 +582,23 @@ func buildBigTree(work string, seed int64) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
+
 	buf := make([]byte, bigTreeBufLen)
-	for leaf := 0; leaf < bigTreeLeafDirs; leaf++ {
+
+	for leaf := range bigTreeLeafDirs {
 		dir := filepath.Join(work, filepath.FromSlash(bigTreeDir(leaf)))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
-		for k := 0; k < bigTreeFanout; k++ {
+
+		for k := range bigTreeFanout {
 			full := filepath.Join(dir, fmt.Sprintf("f%d.txt", k))
 			if err := writeBigTreeFile(full, seed, leaf*bigTreeFanout+k, buf); err != nil {
 				return err
 			}
 		}
 	}
+
 	return fixDirTimes(root)
 }
 
@@ -538,27 +608,32 @@ func writeBigTreeFile(path string, seed int64, index int, buf []byte) error {
 	if err != nil {
 		return err
 	}
+
 	sum := sha256.Sum256([]byte(fmt.Sprintf("big_tree:%d:%d", seed, index)))
 	for off := 0; off < len(buf); off += len(sum) {
 		copy(buf[off:], sum[:])
 	}
+
 	for written := 0; written < bigTreeFileSize; {
-		n := bigTreeFileSize - written
-		if n > len(buf) {
-			n = len(buf)
-		}
+		n := min(bigTreeFileSize-written, len(buf))
+
 		if _, err := f.Write(buf[:n]); err != nil {
 			_ = f.Close()
+
 			return err
 		}
+
 		written += n
 	}
+
 	if err := f.Close(); err != nil {
 		return err
 	}
+
 	if err := os.Chmod(path, 0o644); err != nil {
 		return err
 	}
+
 	return os.Chtimes(path, FixedMtime, FixedMtime)
 }
 
@@ -568,9 +643,11 @@ func fixDirTimes(root string) error {
 		if err != nil {
 			return err
 		}
+
 		if !d.IsDir() {
 			return nil
 		}
+
 		return os.Chtimes(p, FixedMtime, FixedMtime)
 	})
 }
