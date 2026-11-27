@@ -3,10 +3,12 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -88,10 +90,17 @@ func NewIncus(cfg IncusConfig) (*Incus, error) {
 	if err := os.MkdirAll(cfg.EvidenceDir, 0o755); err != nil {
 		return nil, err
 	}
+	evidence, err := filepath.Abs(cfg.EvidenceDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(evidence, 0o777); err != nil {
+		return nil, err
+	}
 	return &Incus{
 		image:     cfg.Image,
 		incusBin:  cfg.IncusBin,
-		evidence:  cfg.EvidenceDir,
+		evidence:  evidence,
 		memoryMB:  cfg.MemoryMB,
 		workSize:  cfg.WorkSizeMB,
 		scratchSz: cfg.ScratchSizeMB,
@@ -151,7 +160,7 @@ func (i *Incus) configure(ctx context.Context) error {
 		fmt.Sprintf("limits.memory=%dMiB", i.memoryMB),
 		fmt.Sprintf("limits.processes=%d", i.pids),
 		"security.privileged=false",
-		"security.devlxd=false",
+		"security.guestapi=false",
 	)
 	args = append(args, i.extraArgs...)
 	if out, err := i.cli(ctx, args...); err != nil {
@@ -167,17 +176,26 @@ func (i *Incus) configure(ctx context.Context) error {
 // removeNICs drops every network interface of the container: an instance
 // device is removed, an inherited one is masked with a none device.
 func (i *Incus) removeNICs(ctx context.Context) error {
-	out, err := i.cli(ctx, "config", "device", "list", i.name,
-		"--expanded", "--columns", "nt", "--format", "csv,noheader")
+	out, err := i.cli(ctx, "query", "/1.0/instances/"+i.name)
 	if err != nil {
 		return fmt.Errorf("sandbox incus: device list: %w: %s", err, out)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Split(line, ",")
-		if len(fields) < 2 || strings.TrimSpace(fields[1]) != "nic" {
-			continue
+	var info struct {
+		ExpandedDevices map[string]struct {
+			Type string `json:"type"`
+		} `json:"expanded_devices"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		return fmt.Errorf("sandbox incus: device list: %w", err)
+	}
+	devs := make([]string, 0, len(info.ExpandedDevices))
+	for dev, cfg := range info.ExpandedDevices {
+		if cfg.Type == "nic" {
+			devs = append(devs, dev)
 		}
-		dev := strings.TrimSpace(fields[0])
+	}
+	sort.Strings(devs)
+	for _, dev := range devs {
 		if _, err := i.cli(ctx, "config", "device", "remove", i.name, dev); err == nil {
 			continue
 		}
@@ -235,11 +253,11 @@ func (i *Incus) copyIn(ctx context.Context, src, dst string) error {
 	}
 	tarErr := tarCmd.Wait()
 	execErr := execCmd.Wait()
-	if tarErr != nil {
-		return fmt.Errorf("tar: %w", tarErr)
-	}
 	if execErr != nil {
 		return fmt.Errorf("%w: %s", execErr, stderr.Bytes())
+	}
+	if tarErr != nil {
+		return fmt.Errorf("tar: %w", tarErr)
 	}
 	return nil
 }
@@ -296,6 +314,8 @@ func (i *Incus) execRaw(ctx context.Context, script string, timeout time.Duratio
 // killAndCollectLogs stops the container and stores the instance log.
 func (i *Incus) killAndCollectLogs(ctx context.Context) {
 	i.killed = true
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	_, _ = i.cli(ctx, "stop", "--force", i.name)
 	if out, err := i.cli(ctx, "info", i.name, "--show-log"); err == nil {
 		i.logs = out

@@ -88,6 +88,9 @@ config)
     ;;
   esac
   ;;
+query)
+  printf '{"expanded_devices":{"eth0":{"name":"eth0","type":"nic"},"root":{"path":"/","type":"disk"}}}'
+  ;;
 info)
   printf 'container log line\n'
   ;;
@@ -143,12 +146,45 @@ func incusMounts() []string {
 		"106 100 0:58 / /sandbox/scratch rw,nosuid - tmpfs tmpfs rw,size=256m",
 		"107 100 0:59 / /sandbox/evidence rw - ext4 /dev/vdb1 rw",
 		"108 100 0:60 / /etc/hosts rw - ext4 /dev/vda1 rw",
+		"109 100 0:61 /var/lib/incus/shmounts/default_unlucky /dev/.incus-mounts rw - ext4 /dev/vda1 rw",
+		"111 100 0:63 / /etc/machine-id ro - tmpfs tmpfs rw",
+		"112 100 0:64 / /proc/sys/kernel/random/boot_id ro - tmpfs none rw",
+		"113 100 0:65 / /sys/fs/pstore rw - pstore pstore rw",
+		"114 100 0:66 / /sys/firmware/efi/efivars rw - efivarfs efivarfs rw",
+		"115 100 0:67 / /sys/kernel/config rw - configfs configfs rw",
+		"116 100 0:68 / /sys/kernel/debug rw - debugfs debugfs rw",
+		"117 100 0:69 / /sys/kernel/security rw - securityfs securityfs rw",
+		"118 100 0:70 / /sys/kernel/tracing rw - tracefs tracefs rw",
 	}
 }
 
+func incusMountsShmountsTmpfs() []string {
+	mounts := incusMounts()
+	mounts[9] = "110 100 0:62 / /dev/.incus-mounts rw - tmpfs tmpfs rw,size=100k"
+	return mounts
+}
+
+func incusMountsCgroupV1() []string {
+	mounts := incusMounts()
+	return append(mounts,
+		"118 100 0:70 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=10240k,mode=755")
+}
+
+func incusMountsGuestAPIBind() []string {
+	mounts := incusMountsShmountsTmpfs()
+	return append(mounts,
+		"118 100 0:70 /var/lib/incus/guestapi /dev/incus rw,nosuid,nodev - ext4 /dev/vda1 rw")
+}
+
 func incusGuardOutput(mounts []string) string {
-	return "uid=1000\nhome=/sandbox/home\nlinks=lo \nmountinfo-begin\n" +
+	return "uid=1000\nhome=/sandbox/home\nlinks=lo \ndevincus=no\nmountinfo-begin\n" +
 		strings.Join(mounts, "\n") + "\nmountinfo-end\n"
+}
+
+func incusMountsEvidenceTmpfs() []string {
+	mounts := incusMounts()
+	mounts[7] = "107 100 0:59 / /sandbox/evidence rw,nosuid - tmpfs none rw,size=64m"
+	return mounts
 }
 
 func TestParseIncusGuard(t *testing.T) {
@@ -226,6 +262,44 @@ func TestParseIncusGuard(t *testing.T) {
 				"110 100 0:62 / /run rw,nosuid,nodev - tmpfs tmpfs rw",
 				"111 100 0:63 / /run/lock rw,nosuid,nodev,noexec - tmpfs tmpfs rw")),
 		},
+		{
+			name:    "guest api socket present",
+			out:     strings.Replace(incusGuardOutput(incusMounts()), "devincus=no", "devincus=yes", 1),
+			wantSub: "guest API socket /dev/incus present",
+		},
+		{
+			name:    "guest api marker missing",
+			out:     strings.Replace(incusGuardOutput(incusMounts()), "devincus=no\n", "", 1),
+			wantSub: "guest API socket marker missing",
+		},
+		{
+			name: "evidence on tmpfs",
+			out:  incusGuardOutput(incusMountsEvidenceTmpfs()),
+		},
+		{
+			name: "shmounts tmpfs install",
+			out:  incusGuardOutput(incusMountsShmountsTmpfs()),
+		},
+		{
+			name: "shmounts disk install",
+			out:  incusGuardOutput(incusMounts()),
+		},
+		{
+			name: "cgroup v1 tmpfs",
+			out:  incusGuardOutput(incusMountsCgroupV1()),
+		},
+		{
+			name: "sandbox work covered by disk bind",
+			out: incusGuardOutput(append(incusMounts(),
+				"119 100 0:71 / /sandbox/work rw - ext4 /dev/sdb1 rw")),
+			wantSub: `sandbox path "/sandbox/work" is ext4, want tmpfs`,
+		},
+		{
+			name: "guest api socket on disk bind",
+			out: strings.Replace(incusGuardOutput(incusMountsGuestAPIBind()),
+				"devincus=no", "devincus=yes", 1),
+			wantSub: "guest API socket /dev/incus present",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -288,6 +362,30 @@ func TestNewIncusRequiresBinary(t *testing.T) {
 	}
 }
 
+func TestNewIncusEvidencePathAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
+	d, err := NewIncus(IncusConfig{
+		EvidenceDir: filepath.Join("out", "evidence"),
+		IncusBin:    f.bin,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "out", "evidence")
+	if d.evidence != want {
+		t.Fatalf("evidence = %q, want %q", d.evidence, want)
+	}
+	info, err := os.Stat(d.evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o777 {
+		t.Fatalf("evidence mode = %o, want 777", got)
+	}
+}
+
 func TestIncusPrepareCommands(t *testing.T) {
 	f := newFakeIncus(t, incusGuardOutput(incusMounts()))
 	d := f.driver(t, IncusConfig{
@@ -305,10 +403,13 @@ func TestIncusPrepareCommands(t *testing.T) {
 		t.Fatalf("prepare: %v", err)
 	}
 	out := f.output(t)
+	if !filepath.IsAbs(d.evidence) {
+		t.Fatalf("evidence path %q must be absolute", d.evidence)
+	}
 	checks := []string{
 		"init images:debian/12/cloud unlucky-agent-",
 		"config device remove " + d.name + " eth0",
-		"config set " + d.name + " limits.memory=1024MiB limits.processes=2048 security.privileged=false security.devlxd=false security.nesting=true",
+		"config set " + d.name + " limits.memory=1024MiB limits.processes=2048 security.privileged=false security.guestapi=false security.nesting=true",
 		"config device add " + d.name + " evidence disk source=" + d.evidence + " path=/sandbox/evidence",
 		"start " + d.name,
 		"exec " + d.name + " -- mkdir -p /sandbox/work /sandbox/home /sandbox/scratch",

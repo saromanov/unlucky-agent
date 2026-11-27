@@ -93,6 +93,7 @@ var allowedDiskMounts = map[string]bool{
 const incusGuardScript = `printf 'uid=%s\n' "$(id -u)"
 printf 'home=%s\n' "$HOME"
 printf 'links=%s\n' "$(ls /sys/class/net | tr '\n' ' ')"
+printf 'devincus=%s\n' "$([ -e /dev/incus ] && echo yes || echo no)"
 printf 'mountinfo-begin\n'
 cat /proc/self/mountinfo
 printf 'mountinfo-end\n'
@@ -107,6 +108,8 @@ func parseIncusGuard(out string) []string {
 		home      string
 		links     string
 		linksSeen bool
+		devincus  string
+		devSeen   bool
 		mounts    []string
 		inMount   bool
 	)
@@ -122,6 +125,9 @@ func parseIncusGuard(out string) []string {
 		case strings.HasPrefix(line, "links="):
 			links = strings.TrimPrefix(line, "links=")
 			linksSeen = true
+		case strings.HasPrefix(line, "devincus="):
+			devincus = strings.TrimPrefix(line, "devincus=")
+			devSeen = true
 		case line == "mountinfo-begin":
 			inMount = true
 		case line == "mountinfo-end":
@@ -140,8 +146,25 @@ func parseIncusGuard(out string) []string {
 		fails = append(fails, fmt.Sprintf("HOME is %q, want %q", home, guardHomeWant))
 	}
 	fails = append(fails, checkIncusLinks(links, linksSeen)...)
+	fails = append(fails, checkIncusDevIncus(devincus, devSeen)...)
 	fails = append(fails, checkIncusMountinfo(mounts)...)
 	return fails
+}
+
+// checkIncusDevIncus requires the guest API socket to be absent: the script
+// always reports the marker, so a missing line is a failure too.
+func checkIncusDevIncus(devincus string, seen bool) []string {
+	if !seen {
+		return []string{"guest API socket marker missing"}
+	}
+	if devincus != "no" {
+		return []string{
+			"guest API socket /dev/incus present, want absent " +
+				"(security.guestapi=false)",
+		}
+	}
+
+	return nil
 }
 
 // checkIncusLinks requires the container network namespace to expose the
@@ -165,18 +188,25 @@ var incusPseudoFilesystems = map[string]bool{
 	"fuse.lxcfs":  true,
 	"fusectl":     true,
 	"binfmt_misc": true,
+	"configfs":    true,
+	"debugfs":     true,
+	"securityfs":  true,
+	"tracefs":     true,
+	"pstore":      true,
+	"efivarfs":    true,
 }
 
 // incusAllowedDiskMounts are the disk-backed mount points the incus layout
 // permits. The container rootfs lives on a host storage pool by definition,
 // so "/" is allowed.
 var incusAllowedDiskMounts = map[string]bool{
-	"":                  true,
-	"/":                 true,
-	"/sandbox/evidence": true,
-	"/etc/hosts":        true,
-	"/etc/hostname":     true,
-	"/etc/resolv.conf":  true,
+	"":                   true,
+	"/":                  true,
+	"/sandbox/evidence":  true,
+	"/etc/hosts":         true,
+	"/etc/hostname":      true,
+	"/etc/resolv.conf":   true,
+	"/dev/.incus-mounts": true,
 }
 
 // incusTmpfsPaths must be mounted as tmpfs inside the container.
@@ -185,13 +215,19 @@ var incusTmpfsPaths = []string{containerWork, containerHome, containerScratch}
 // incusTmpfsMounts are the only mount points the incus layout may back with
 // tmpfs: the sandbox trees plus the runtime paths the image itself needs.
 var incusTmpfsMounts = map[string]bool{
-	containerWork:    true,
-	containerHome:    true,
-	containerScratch: true,
-	"/dev":           true,
-	"/dev/shm":       true,
-	"/run":           true,
-	"/run/lock":      true,
+	containerWork:                     true,
+	containerHome:                     true,
+	containerScratch:                  true,
+	containerEvidence:                 true,
+	"/dev":                            true,
+	"/dev/shm":                        true,
+	"/dev/incus":                      true,
+	"/dev/.incus-mounts":              true,
+	"/etc/machine-id":                 true,
+	"/proc/sys/kernel/random/boot_id": true,
+	"/run":                            true,
+	"/run/lock":                       true,
+	"/sys/fs/cgroup":                  true,
 }
 
 // checkIncusMountinfo flags disk-backed mounts outside the incus allowed set
@@ -228,7 +264,7 @@ func checkIncusMountinfo(mounts []string) []string {
 		if pseudoFilesystems[fstype] || incusPseudoFilesystems[fstype] {
 			continue
 		}
-		if !incusAllowedDiskMounts[mountPoint] && !isIncusTmpfsPath(mountPoint) {
+		if !incusAllowedDiskMounts[mountPoint] {
 			fails = append(fails, fmt.Sprintf("disk-backed mount %q (fstype %s) outside /sandbox/evidence", mountPoint, fstype))
 		}
 	}
@@ -241,29 +277,14 @@ func checkIncusMountinfo(mounts []string) []string {
 			fails = append(fails, fmt.Sprintf("sandbox path %q is not mounted, want tmpfs", p))
 			continue
 		}
-		if !hasFilesystem(got, "tmpfs") {
-			fails = append(fails, fmt.Sprintf("sandbox path %q is %s, want tmpfs", p, got[0]))
+		for _, t := range got {
+			if t != "tmpfs" {
+				fails = append(fails, fmt.Sprintf("sandbox path %q is %s, want tmpfs", p, t))
+				break
+			}
 		}
 	}
 	return fails
-}
-
-func isIncusTmpfsPath(mountPoint string) bool {
-	for _, p := range incusTmpfsPaths {
-		if mountPoint == p {
-			return true
-		}
-	}
-	return false
-}
-
-func hasFilesystem(types []string, want string) bool {
-	for _, t := range types {
-		if t == want {
-			return true
-		}
-	}
-	return false
 }
 
 // checkMountinfo flags disk-backed mounts outside the allowed set. A host

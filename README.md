@@ -84,10 +84,11 @@ The `incus` driver runs the same layout inside an unprivileged Incus container:
 ```
 
 Each scenario gets a fresh container from `images:debian/12/cloud` (`-incus-image` overrides it).
-The container runs with `security.privileged=false`, `security.devlxd=false`, no network devices,
+The container runs with `security.privileged=false`, `security.guestapi=false`, no network devices,
 and `limits.memory`/`limits.processes` from the same floors as docker. The work, home and scratch
 trees are tmpfs mounts installed through `raw.lxc` at the sizes above; the evidence directory is
-the only host bind. The pre-flight guard checks the uid and `$HOME`, requires a `fuse.lxcfs` mount
+the only host bind. The pre-flight guard checks the uid and `$HOME`, requires `/dev/incus` to be
+absent, requires a `fuse.lxcfs` mount
 as the container marker, requires work, home and scratch to be tmpfs, allows only the loopback
 interface in the network namespace, and refuses any other disk-backed mount with `GUARD_FAILED`.
 The host canary works the same way.

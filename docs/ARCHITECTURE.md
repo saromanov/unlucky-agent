@@ -281,17 +281,18 @@ receives SIGKILL; the bench does not wait for a graceful shutdown.
 
 A second container backend implements the same `sandbox.Driver` interface: `-sandbox incus`
 creates one unprivileged Incus container per scenario from `images:debian/12/cloud`. The driver
-removes every network device, sets `limits.memory` and `limits.processes`, disables
-`security.devlxd`, bind-mounts only the evidence directory, and installs the work, home and
+removes every network device, sets `limits.memory`, `limits.processes` and `security.guestapi=false`, bind-mounts only the evidence directory, and installs the work, home and
 scratch tmpfs trees through `raw.lxc` entries at the same sizes as the docker driver. Exec, the
 cp-r and perfect baselines, the size metrics and the fixture copy-in/out all follow the docker
 implementation; the tar streams go through `incus exec` with a piped stdin. Like the docker
 driver, it does not implement `Interruptible`, so interrupt scenarios are reported as skipped.
 
 The guard is that driver's own variant: the container marker is a `fuse.lxcfs` mount instead of
-`/.dockerenv`, the tmpfs requirement covers `/sandbox/work`, `/sandbox/home` and
+`/.dockerenv`, `/dev/incus` must be absent (the probe fails when the guest API socket is present
+or its marker is missing), the tmpfs requirement covers `/sandbox/work`, `/sandbox/home` and
 `/sandbox/scratch`, only the loopback interface may be present, and the container rootfs (`/`)
-counts as a permitted disk-backed mount. The `Driver` interface plus the optional `CPBaseline`,
+counts as a permitted disk-backed mount. A tmpfs-backed `/sandbox/evidence` is permitted, matching
+the docker branch. The `Driver` interface plus the optional `CPBaseline`,
 `PerfectBaseline`, `SnapshotSizer` and `StorageSizer` interfaces let the runner pick up the new
 backend without a single change to the runner itself.
 
