@@ -5,3 +5,6 @@ dist/
 *.tmp
 .DS_Store
 coverage.out
+
+# agent guide is tracked in this repo
+!AGENTS.md
